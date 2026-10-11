@@ -1,0 +1,199 @@
+# Weekly: has the vendor published a Claude Code version above our pin?
+#
+# WHY THIS EXISTS ALONGSIDE THE ON-HOST TIMER. The timer answers the question on
+# each governed host and marks a unit failed - which reaches nobody unless
+# somebody logs in and looks. This job answers the same question from GitHub's own
+# machines and keeps ONE issue in sync with the answer, so the notice arrives by
+# email without anyone touching a host. Two halves, one question, different
+# failure modes: the timer keeps working when GitHub is unreachable, and this
+# keeps working when the hosts are down.
+#
+# WHAT IT NEVER DOES: it does not choose a target, does not judge whether a
+# release matters, and moves nothing. Target choice is docs/OPERATIONS.md §3.1;
+# the move is Part 7. An issue from this job is an input to a decision, not one.
+#
+# THE PIN IS READ FROM THE POLICY, EVERY RUN. There is no version literal in this
+# file and no fallback default - a second copy of the pin is a second source of
+# truth, and this job's whole value is telling you when the real one is behind.
+#
+# NOT A GATING JOB. The gates are the jobs of ci.yml (see README).
+#
+# TRIGGER HONESTY, because scheduled workflows have three traps:
+#   * `schedule:` only ever runs the DEFAULT BRANCH's copy of this file, so
+#     edits on a feature branch are inert until merged.
+#   * GitHub DISABLES scheduled workflows after 60 days of repository
+#     inactivity, and emails the owner when it does.
+#   * cron times drift under load; treat the day as reliable and the minute as
+#     approximate.
+#
+# ubuntu-latest, not the rockylinux:8 container the gating job uses: this job
+# makes HTTPS requests and compares strings - there is no fleet behaviour to
+# reproduce - and `gh` is preinstalled here and absent there.
+
+name: version-watch
+
+on:
+  schedule:
+    - cron: '17 7 * * 1'          # Mondays, 07:17 UTC
+  workflow_dispatch:
+    inputs:
+      simulate_head:
+        description: 'Pretend the vendor published this version (tests the alert path; never changes the pin)'
+        required: false
+        type: string
+
+permissions:
+  contents: read                  # checkout, to read the pin out of the policy
+  issues: write                   # create / edit / comment / close the one alert issue
+
+concurrency:
+  group: version-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pin from the policy
+        id: pin
+        run: |
+          set -euo pipefail
+          pin=$(python3 -c '
+          import json
+          print(json.load(open("settings/managed-settings.json")).get("requiredMinimumVersion") or "")')
+          if [ -z "$pin" ]; then
+            echo "::error::settings/managed-settings.json carries no requiredMinimumVersion - cannot tell whether we are behind"
+            exit 1
+          fi
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+          echo "Pin read from the policy: $pin"
+
+      - name: Resolve the vendor head
+        id: head
+        env:
+          SIMULATE: ${{ inputs.simulate_head }}
+        run: |
+          set -uo pipefail
+          # Three sources, in order, and the one that answered is recorded. NONE
+          # is assumed reachable from a GitHub runner, which is why the job
+          # fails RED when every source fails rather than reporting "current".
+          #   1. the RPM repository metadata - the only head that means
+          #      "installable from the package repository"
+          #   2. the vendor channel endpoint the official installer itself reads
+          #   3. the npm dist-tag - a different origin, so a genuine fallback
+          # The vendor URLs come from config through the loader, like every site
+          # value; a runner has no config.sh, so these are config.example.sh's.
+          . lib/cc-config.sh
+          export CC_RPM_BASEURL CC_RELEASE_CHANNEL_URL
+          python3 - <<'PY' | tee head.env
+          import gzip, json, os, re, sys, urllib.request
+          UA = {"User-Agent": "Mozilla/5.0 (compatible; cc-version-watch)"}
+          def get(url, binary=False):
+              req = urllib.request.Request(url, headers=UA)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return r.read() if binary else r.read().decode()
+
+          sim = os.environ.get("SIMULATE", "").strip()
+          if sim:
+              print(f"head={sim}"); print("source=simulated"); sys.exit(0)
+
+          base = os.environ["CC_RPM_BASEURL"].rstrip("/")
+          head, source = "", ""
+          try:
+              repomd = get(f"{base}/repodata/repomd.xml")
+              loc = re.search(r'type="primary".*?href="([^"]+)"', repomd, re.S).group(1)
+              primary = gzip.decompress(get(f"{base}/{loc}", binary=True)).decode()
+              vers = re.findall(r'<version epoch="[^"]*" ver="([0-9.]+)"', primary)
+              if vers:
+                  head = max(vers, key=lambda v: [int(x) for x in v.split(".")])
+                  source = "rpm-repodata"
+          except Exception as e:
+              print(f"note=rpm-repodata failed: {e}", file=sys.stderr)
+          if not head:
+              try:
+                  head = get(os.environ["CC_RELEASE_CHANNEL_URL"]).strip()
+                  source = "vendor-channel"
+              except Exception as e:
+                  print(f"note=vendor-channel failed: {e}", file=sys.stderr)
+          if not head:
+              try:
+                  head = json.loads(get("https://registry.npmjs.org/@anthropic-ai/claude-code"))["dist-tags"]["stable"]
+                  source = "npm-dist-tag"
+              except Exception as e:
+                  print(f"note=npm-dist-tag failed: {e}", file=sys.stderr)
+          if not head:
+              print("::error::every vendor source failed - this job cannot tell whether a newer version exists", file=sys.stderr)
+              sys.exit(1)
+          print(f"head={head}"); print(f"source={source}")
+          PY
+          cat head.env >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile the single alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIN: ${{ steps.pin.outputs.pin }}
+          HEAD_VER: ${{ steps.head.outputs.head }}
+          SOURCE: ${{ steps.head.outputs.source }}
+        run: |
+          set -euo pipefail
+          # Identity is a MARKER IN THE BODY, not a label and not the title: a
+          # label that does not exist makes `gh issue create --label` fail, and a
+          # title changes whenever the version does.
+          MARKER='<!-- cc-version-watch:v1 -->'
+          num=$(gh issue list --state open --search "\"cc-version-watch:v1\" in:body" \
+                  --json number --jq '.[0].number // empty' || true)
+
+          behind=$(python3 -c '
+          import sys
+          def key(v): return [int(x) for x in v.split(".")]
+          print("yes" if key(sys.argv[1]) > key(sys.argv[2]) else "no")' "$HEAD_VER" "$PIN")
+
+          if [ "$behind" = no ]; then
+            echo "Nothing above the pin ($HEAD_VER <= $PIN)."
+            if [ -n "$num" ]; then
+              # THE BUMP CLOSES THE ALERT. Nobody has to remember to.
+              gh issue comment "$num" --body "The pin is now \`$PIN\`; nothing above it is published (\`$HEAD_VER\`, source \`$SOURCE\`). Closing."
+              gh issue close "$num"
+            fi
+            exit 0
+          fi
+
+          # Anti-spam: one comment per REAL change, never one per run. The
+          # previous number is parsed back out of the issue's own marker, so this
+          # workflow keeps no state file and nothing in git can go stale.
+          prev=""
+          if [ -n "$num" ]; then
+            prev=$(gh issue view "$num" --json body --jq '.body' \
+                     | sed -n 's/.*<!-- machine: pin=[^ ]* newest=\([^ ]*\).*/\1/p' | head -1)
+          fi
+
+          body=$(cat <<EOF
+          $MARKER
+          <!-- machine: pin=$PIN newest=$HEAD_VER source=$SOURCE -->
+
+          **A Claude Code version above the pin has been published.**
+
+          | | |
+          | --- | --- |
+          | Pin (read from \`settings/managed-settings.json\`) | \`$PIN\` |
+          | Newest published | \`$HEAD_VER\` |
+          | Source that answered | \`$SOURCE\` |
+
+          **This issue is not a decision.** Choosing a target is \`docs/OPERATIONS.md\` §3.1; the move itself is Part 7 — open a session in the deployment repository and say *version bump*. Nothing here has moved a package or touched a policy.
+
+          A published build is not automatically a documented one (\`docs/UPGRADES.md\`). The changelog entry for a candidate is part of the target decision, not an afterthought.
+
+          **This issue closes itself** once the pin reaches this version — the weekly run comments and closes it.
+          EOF
+          )
+
+          if [ -z "$num" ]; then
+            gh issue create --title "Claude Code $HEAD_VER is available (pin $PIN)" --body "$body"
+          elif [ "$prev" != "$HEAD_VER" ]; then
+            gh issue edit "$num" --title "Claude Code $HEAD_VER is available (pin $PIN)" --body "$body"
+            gh issue comment "$num" --body "The newest published version moved: \`${prev:-unknown}\` → \`$HEAD_VER\`."
+          else
+            echo "Issue #$num already reports $HEAD_VER; saying nothing."
+          fi

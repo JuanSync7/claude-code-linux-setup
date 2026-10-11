@@ -1,0 +1,220 @@
+{
+  "_comment_0_THIS_IS_THE_LIVE_POLICY": "This file is the authored source of the policy deployed on every governed host: cc-install.sh --apply copies it to /etc/claude-code/managed-settings.json. Documentation: SETTINGS-REFERENCE.md explains every key below, its classification (boundary / lock / tunable / pilot / deferred) and the safe change procedure; its section 6 inventories every key that EXISTS but is deliberately NOT set in this file, with the default each one takes and the recorded position. This file lists only what is enforced - defaults are never restated here, because a stale restated default is worse than none. internal/CURRENT-STATE.md holds live state and open findings. Do not treat these _comment_ keys as the settings documentation of record: the installer deliberately does not validate them, so they go stale invisibly.",
+  "_comment_1": "POSTURE A - gated interactive workstation, with the secret-filename guard. Deploy to /etc/claude-code/managed-settings.json, root:root, mode 644. CHANGE PROCEDURE: edit this file, commit it, then bin/cc-install.sh --check followed by --apply from a REAL terminal. Never hand-edit the deployed file, and never apply from inside a Claude Code session: cc-install.sh refuses to apply when the policy path is a bind mount, because in an admin session that write lands on the admin policy instead.",
+  "_comment_2": "Baseline is prompt-on-use; the deny list below is an absolute blocklist that no user, project or CLI flag can lift. True deny-by-default for the network comes from the sandbox block. Auto mode is deliberately NOT disabled - the classifier runs AFTER these rules, so every deny still holds (RUNBOOK.md 8.5).",
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "_comment_globs": "FILENAME RULES (a site records the behaviour at its version in internal/LIMITATIONS-AND-RISKS.md). The four Read(**/...) rules below match a secret by FILENAME anywhere on disk. Whether a build enforces such glob rules on Linux depends on its version: a build that ignores them says so in /doctor inside a session, and probe M10 of cc-bump-audit.sh asks at each version move. Either way the enforcement of record is hooks.PreToolUse -> cc-secret-guard-hook.sh, which matches on basename. Read(**/.env.*) is deliberately ABSENT: deny rules run before the hook, so where globs enforce it refused .env.example, which the guard allow-lists; every other .env.<name> is stopped by the guard. Directory rules (~/.ssh, ~/.aws, ~/.gnupg) enforce. The Edit rules on ~/.ssh, ~/.local/bin and the user settings files stop a session writing something that outlives it: a key, a binary that shadows the managed one on PATH, a settings file.",
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(su *)",
+      "Bash(dnf *)",
+      "Bash(yum *)",
+      "Bash(rpm *)",
+      "Bash(systemctl *)",
+      "Bash(firewall-cmd *)",
+      "Bash(useradd *)",
+      "Bash(usermod *)",
+      "Bash(passwd *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(nc *)",
+      "Bash(ncat *)",
+      "Bash(ssh *)",
+      "Bash(scp *)",
+      "Bash(rsync *)",
+      "Bash(aws *)",
+      "Bash(chmod 777 *)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(//etc/claude-code/**)",
+      "Read(//etc/shadow)",
+      "Read(//etc/sudoers)",
+      "Read(**/.env)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa*)",
+      "Read(**/id_ed25519*)",
+      "Edit(//etc/**)",
+      "Edit(//usr/**)",
+      "Edit(//opt/**)",
+      "Edit(~/.bashrc)",
+      "Edit(~/.bash_profile)",
+      "Edit(~/.profile)",
+      "Edit(~/.cshrc)",
+      "Edit(~/.tcshrc)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.local/bin/**)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)",
+      "mcp__*"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git remote *)",
+      "Bash(docker *)",
+      "Bash(podman *)"
+    ],
+    "additionalDirectories": []
+  },
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "disableSideloadFlags": true,
+  "strictPluginOnlyCustomization": ["hooks", "mcp"],
+  "disableClaudeAiConnectors": true,
+  "_comment_egress_keys": "TWO KEYS THAT SEND CONTENT WITHOUT BEING A TOOL CALL, so no deny rule, classifier rule or sandbox setting reaches them - the same argument as the env block in SETTINGS-REFERENCE 3.8. autoUploadSessions:false stops local sessions being mirrored to claude.ai; a mirrored session is customer material leaving the fleet, and it is set rather than left at its default so that a default cannot drift under us. syncClaudeAiSkills:false stops skills a user enabled on their PERSONAL claude.ai account being downloaded into ~/.claude/skills/synced and re-synced; the key is honoured only as false, because the feature is enabled server-side per account, so leaving it unset leaves the sync running. Skills are instructions and cannot widen the session envelope - this closes the distribution channel, not a privilege. Do NOT achieve the same thing by adding skills to strictPluginOnlyCustomization: that would also shut this repository own skills.",
+  "autoUploadSessions": false,
+  "syncClaudeAiSkills": false,
+  "_comment_hooks": "Evidence layer (RUNBOOK.md 11.7) plus the secret-filename guard. cc-audit-hook.sh logs the SHAPE (tool + command/path/url, never contents) of Bash/Edit/Write/WebFetch. cc-secret-guard-hook.sh blocks reads/writes whose BASENAME looks like a credential - it is the enforcement of record for the filename rules whatever their status at this version (_comment_globs), and covers Read too, which the audit hook deliberately does not. cc-denied-hook.sh logs refusals. cc-redact-hook.sh (PostToolUse, every tool) replaces credential-shaped text in a tool's OUTPUT before the model sees it - it covers what a script prints, which no rule on the command can see. cc-upgrade-guard-hook.sh converts self-update attempts (claude update, npm sideload, vendor installer, package-manager moves of claude-code) into a signpost to the version-bump procedure instead of a bare denial. NOTE: PermissionDenied does not fire in headless (claude -p) runs at the pinned build; probe M5 of bin/cc-bump-audit.sh re-tests it at each bump. All hooks always exit 0 EXCEPT the secret guard and the upgrade guard, which exit 2 on a positive match by design. allowManagedHooksOnly:true means only these load. Log dirs /var/log/claude-code/{activity,denied} must exist mode 1733.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-audit-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-upgrade-guard-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-secret-guard-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-redact-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Bash|Edit|Write|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-denied-hook.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "_comment_sandbox": "SANDBOX DISABLED, deliberately; docs/SANDBOX-DECISION.md is the record. Reasons, each sufficient alone: (1) IT MUST BE PROVEN PER HOST - the same build can start the sandbox on one host and fail on another, and a host where it fails cannot run ANY Bash command (docs/SANDBOX-DECISION.md 2.1, 2.2). (2) IT FITS SHARED ENGINEERING HOSTS POORLY - a narrow allowWrite leaves the project trees, $HOME and /tmp read-only; a client that speaks raw TCP (a database client, an ssh connection) cannot pass the domain-based HTTP relay, so it would have to run unsandboxed via excludedCommands; allowManagedReadPathsOnly:true makes every new project mount a policy change (2.3). (3) EVADABLE - unprivileged userns must stay enabled for bubblewrap (which is the sandbox on Linux), so any user can shed the sandbox with 'unshare -Urm' plus a bind of their own policy (2.4). A sandbox block to start from is kept below as _sandbox_disabled. ENABLE ONLY after a fresh-session 'echo hi' succeeds on the host under this policy, and pilot on one volunteer first (docs/SANDBOX-DECISION.md 4).",
+  "sandbox": {
+    "enabled": false
+  },
+  "_comment_domains": "The suffix is the one autoMode.environment names as trusted; list a host here only once it exists and has been verified. When an internal mirror/registry exists, add its real host under that suffix here AND remove pypi.org/files.pythonhosted.org/registry.npmjs.org so installs must route through it. Never name a public host as the internal registry - that switches the classifier's protection off.",
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "Organization: REPLACE-WITH-ORGANIZATION. Primary use: REPLACE-WITH-PRIMARY-USE",
+      "Cloud provider(s): REPLACE-WITH-CLOUD-PROVIDERS",
+      "Trusted internal domains: *.REPLACE-WITH-INTERNAL-DOMAIN",
+      "Internal storage: REPLACE-WITH-STORAGE-DESCRIPTION",
+      "Sensitive data locations & audiences: REPLACE-WITH-SENSITIVE-DATA-LOCATIONS",
+      "Additional context: REPLACE-WITH-HOST-DESCRIPTION",
+      "Source control: not yet specified - the classifier therefore treats every source-control host as an untrusted destination until an entry is added here"
+    ],
+    "hard_deny": [
+      "$defaults",
+      "Never send customer data to any host outside REPLACE-WITH-INTERNAL-DOMAIN"
+    ],
+    "classifyAllShell": true
+  },
+  "_comment_statusline": "The status line is a managed DEFAULT: every user gets it with no per-user step (/etc/skel reaches only accounts created after it is seeded). A user replaces it with their own ~/.claude/statusline.sh, which the shipped script hands over to - a statusLine key in their own settings is ignored, because this tier wins. Mechanism and safety checks: SETTINGS-REFERENCE.md 3.9; the segment list lives in the script header.",
+  "statusLine": {
+    "type": "command",
+    "command": "bash /usr/local/share/claude-code/statusline.sh"
+  },
+  "autoUpdatesChannel": "stable",
+  "requiredMinimumVersion": "2.1.236",
+  "_comment_versionfloor": "This floor is enforced for every binary on the host, including private per-user installs, so raising it can stop a user's own install from starting. Do NOT restate the affected set here - it changes with every floor move and with every private upgrade. The live answer is probe A5 (bash bin/cc-bump-audit.sh), which recomputes it against this floor; the register is internal/CURRENT-STATE.md. The duty is announce-first (OPERATIONS 3.4 and 1.5b): run A5 with --target-version BEFORE moving this number, and tell everyone it newly affects. requiredMaximumVersion is deliberately UNSET: setting it would also stop a deliberately preserved private install and the IDE extension's bundled CLI, both of which may run ahead of the pin.",
+  "forceLoginMethod": "claudeai",
+  "_comment_deferred_orgpin": "DEFERRED: forceLoginOrgUUID is intentionally ABSENT. Consequence: logins are not pinned to the company's organisation, so a personal Claude account could sign in on this host, and environment-credential logins (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / apiKeyHelper) are not blocked. To close it: add the key forceLoginOrgUUID with the UUID from claude.ai Admin settings -> Organization, then re-run cc-install.sh --apply. Do NOT put a placeholder value here: a wrong-but-well-formed UUID refuses every login on the host, locking everyone out.",
+  "_comment_retention": "cleanupPeriodDays is 90, above the vendor default. On a host that holds customer data under NDA the session transcripts are the only record of what the agent did in a customer project. The activity hook is a durable IT-owned record independent of this. Agree the final number with whoever owns audit/IP obligations (RUNBOOK.md 11.6).",
+  "cleanupPeriodDays": 90,
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_FEEDBACK_COMMAND": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"
+  },
+  "companyAnnouncements": [
+    "  REPLACE-WITH-BANNER-ART\n\nREPLACE-WITH-ORGANIZATION managed Claude Code. Policy is set by IT and cannot be changed locally.\nBlocked by design: sudo, package installs, network tools (curl, ssh, scp) and credential files (~/.ssh, ~/.aws, .env, keys).\nEvery tool call is logged per the acceptable-use policy. Blocked by something you need? Email REPLACE-WITH-SUPPORT-EMAIL - please do not work around it.\n\nNew here? Read the engineer's guide:  less /usr/local/share/claude-code/ENGINEER-GUIDE.md\nClaude Code docs:       https://code.claude.com/docs/en/quickstart\nUsing it with our plan: https://support.claude.com/en/articles/11845131-using-claude-code-with-your-team-or-enterprise-plan"
+  ],
+  "_comment_feedback": "DISABLE_FEEDBACK_COMMAND is set explicitly, not left to the umbrella CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, because the docs do not state the umbrella covers /feedback - the highest-risk path (conversation history INCLUDING CODE, optional PUBLIC GitHub issue, 5-year retention). Keeping every key explicit makes the policy audit-legible (RUNBOOK.md 1.5).",
+  "disableRemoteControl": true,
+  "_sandbox_disabled": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": [],
+    "filesystem": {
+      "allowManagedReadPathsOnly": true,
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg",
+        "~/.claude",
+        "/etc/claude-code",
+        "/var/log/claude-code"
+      ],
+      "allowRead": [
+        "~/",
+        "/projects",
+        "/scratch",
+        "/tools",
+        "/srv/data",
+        "/opt/toolchains",
+        "/usr/share"
+      ],
+      "allowWrite": [
+        "/scratch"
+      ]
+    },
+    "network": {
+      "strictAllowlist": true,
+      "allowManagedDomainsOnly": true,
+      "allowedDomains": [
+        "api.anthropic.com",
+        "platform.claude.com",
+        "claude.ai",
+        "claude.com",
+        "code.claude.com",
+        "downloads.claude.ai",
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "github.com"
+      ]
+    }
+  },
+  "_comment_compensating": "WHAT REPLACES IT. Lost: (a) subprocess-level filesystem containment \u2014 deny rules and the secret-guard hook only see Claude's OWN tool calls, never a subprocess's open(); (b) kernel-enforced network deny-by-default (strictAllowlist). Compensating controls, in order of value: 1. EGRESS FILTERING AT THE FIREWALL/PROXY \u2014 covers every process not just Claude Code, and no user can unshare around it. Treat as a prerequisite before widening use beyond the first group. 2. chmod 700 homes and credential directories (state: internal/CURRENT-STATE.md); decide group ownership + ACLs on the project trees \u2014 that is the real control for separating one customer's data from another's, and it never depended on the sandbox. 3. Keep the secret-guard hook. 4. ADMIN-SPECIFIC: with the sandbox off, a script Claude runs CAN call sudo successfully for any account holding NOPASSWD:ALL (a site lists such accounts in internal/LIMITATIONS-AND-RISKS.md). Under the sandbox that failed because setuid is broken in a userns. Recommend dropping NOPASSWD for admin accounts so non-interactive sudo from a subprocess cannot succeed."
+}

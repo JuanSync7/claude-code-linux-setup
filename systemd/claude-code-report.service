@@ -1,0 +1,33 @@
+# Weekly: run every check, and write one file a person can act on.
+#
+# Runs as root because the material is unreadable otherwise - the evidence logs
+# are 0600 per user inside 1733 directories, healthcheck.log is 0640 root:root,
+# and two probes under-report without root. A report that quietly omits what it
+# could not read would be worse than no report; section 11 of the output names
+# every collector that did not run, and why.
+#
+# Exit 1 means "at least one ALERT", which marks this unit failed on purpose -
+# the same idiom claude-code-healthcheck.service uses. Exit 3 means the run could
+# not complete at all, which is deliberately a different code.
+#
+# A failed unit reports to nobody until somebody attaches a route and names
+# themselves; OnFailure= is where that route goes. Left commented because
+# delivery is a network write and this repository proposes rather than applies.
+
+[Unit]
+Description=Claude Code weekly estate report
+# Documentation: docs/REPORTING.md in the checkout this host was deployed from. Not a
+# Documentation= line: no path to it is the same on every host, and a dead
+# link in `systemctl status` is worse than none.
+After=network-online.target claude-code-healthcheck.service
+Wants=network-online.target
+#OnFailure=claude-code-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cc-report.sh
+StandardOutput=journal
+StandardError=journal
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=20min

@@ -1,0 +1,8 @@
+# site values and data never go in git
+config.json
+*.db
+*.db-journal
+*.jsonl
+__pycache__/
+.playwright-mcp/
+.demo/

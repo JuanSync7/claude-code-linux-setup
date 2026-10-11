@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Site configuration — never committed.
+#
+# config.sh holds a site's values (paths, group and admin names, contact). config.example.sh is the committed template; copy it
+# and fill it in. See README.md §Configure.
+#
+# Nothing in config.sh is a credential — see internal/CURRENT-STATE.md — but it
+# is site topology, and keeping it out of the repo is what lets this tree be
+# shared, forked or handed to a vendor without redaction.
+# ---------------------------------------------------------------------------
+config.sh
+config.*.sh
+!config.example.sh
+
+# Per-user Claude Code session state, not deployment config. .claude/skills/
+# IS tracked - those are the maintenance skills, see .claude/README.md.
+.claude/settings.local.json
+.claude/*.local.json
+.claude/.cc-writes/
+.claude/scheduled_tasks.lock
+
+# Editor and OS noise
+*.swp
+*~
+.DS_Store
+
+# Never commit a backup or a timestamped copy — they are how stale files come
+# back to life after someone greps the tree and finds the wrong one first.
+*.orig
+*.orig.*
+*.bak
+*.bak-*
+*.rej
+*.tar.gz

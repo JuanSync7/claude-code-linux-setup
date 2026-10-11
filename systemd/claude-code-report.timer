@@ -1,0 +1,19 @@
+# Monday 07:30, after the daily health check (06:30 + up to 15m of jitter) has
+# finished, and 15 minutes after the version watch - so three failed units are
+# distinguishable in `systemctl --failed` by their timestamps.
+#
+# Monday means the window is the previous calendar week and the answer is on the
+# desk before anyone asks for it. Persistent=true so a host that was down over
+# the weekend produces the missed report on next boot rather than skipping a
+# week in silence.
+
+[Unit]
+Description=Run the Claude Code estate report weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 07:30:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

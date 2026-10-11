@@ -1,0 +1,22 @@
+{
+  "store": "/var/lib/fleetdash/store.db",
+  "host_label": "dashboard host",
+  "bind": "127.0.0.1",
+  "port": 8765,
+  "transcript_glob": "/home/*/.claude/projects",
+  "user_from_path": "/home/([^/]+)/",
+  "hook_log_dir": "/var/log/claude-code",
+  "verify_file_owner": true,
+  "bedrock_model_pattern": "^(?:(?:[a-z]{2,4}\\.)?anthropic\\.|arn:aws:bedrock:)",
+  "prices_per_mtok": {},
+  "seats": [],
+  "under_use": {"idle_days": 14, "median_fraction": 0.1},
+  "retention": {
+    "pass":   {"days": 14,  "max_rows": 500000},
+    "info":   {"days": 90,  "max_rows": 200000},
+    "deny":   {"days": 365, "max_rows": 200000},
+    "redact": {"days": 365, "max_rows": 200000},
+    "quota":  {"days": 365, "max_rows": 200000},
+    "error":  {"days": 180, "max_rows": 200000}
+  }
+}

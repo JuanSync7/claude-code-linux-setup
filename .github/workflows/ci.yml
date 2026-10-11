@@ -1,0 +1,115 @@
+# CI for the Claude Code control plane.
+#
+# All content checks live in bin/cc-ci-check.sh — one script, called by this
+# file and by .gitlab-ci.yml, so the two platforms cannot drift. The checks
+# run in a Rocky 8 container because the scripts target RHEL 8 hosts: "works on
+# Ubuntu" proves nothing about a host with no jq and python36's python3.
+#
+# What CI deliberately does NOT do: filesystem modes on a shared checkout
+# (group, setgid, internal/'s 2770). Git does not record them, so no
+# remote can check them — githooks/post-merge and bin/cc-repo-perms.sh own
+# that, per checkout.
+
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+    steps:
+      # git must be present BEFORE checkout, or actions/checkout falls back to
+      # a tarball download and every `git ls-files` check below dies.
+      - name: Install the fleet-parity toolset
+        run: dnf -y install git make python36 findutils >/dev/null
+      - uses: actions/checkout@v4
+      - name: Trust the workspace (container UID != checkout UID)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Content checks
+        run: bash bin/cc-ci-check.sh
+
+  test-suite:
+    # Gating. Runs as root in the container, so the root-only cases (I8, AS*,
+    # RP13) run too; each case a container cannot fabricate SKIPs with its
+    # reason, and the run fails on any FAIL. Every root-run case writes only
+    # under its own scratch tree.
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+    steps:
+      - name: Install the fleet-parity toolset
+        run: dnf -y install git make python36 findutils procps-ng logrotate diffutils >/dev/null
+      - uses: actions/checkout@v4
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Self-test suite (root inside the container)
+        run: bash tests/test-cc-scripts.sh
+
+  deny-scan:
+    # The template edition only (docs/PUBLISHING.md section 4). template.json
+    # marks it; a site edition may name its own site and has nothing to scan.
+    # The deny list is the repository secret PUBLISH_DENYLIST, one term per
+    # line. The repository that publishes the template sets the variable
+    # PUBLISH_SCAN to "required": there, a missing secret fails the job rather
+    # than pass everything. A fork that is filling the template has neither,
+    # and has no list to scan against, so the job says so and passes. A pull
+    # request from a fork receives no secrets, so it is skipped and scanned on
+    # the merge push.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+    steps:
+      - name: Install the fleet-parity toolset
+        run: dnf -y install git make python36 findutils >/dev/null
+      - uses: actions/checkout@v4
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Deny-list scan of every tracked file
+        env:
+          CC_PUBLISH_DENY: ${{ secrets.PUBLISH_DENYLIST }}
+          PUBLISH_SCAN: ${{ vars.PUBLISH_SCAN }}
+        run: |
+          if [ ! -e template.json ]; then echo "site edition - no deny-list scan"; exit 0; fi
+          if [ -z "$CC_PUBLISH_DENY" ] && [ "$PUBLISH_SCAN" != required ]; then
+            echo "no deny list in this repository, and PUBLISH_SCAN is not 'required' - nothing to scan against"; exit 0
+          fi
+          bash bin/cc-publish.sh --scan
+
+  dashboard:
+    # The dashboard's unit and process tests on the fleet Python. The image has
+    # no browser, so its browser tests are skipped by name, not by accident.
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+    steps:
+      - name: Install the fleet-parity toolset
+        run: dnf -y install git make python36 findutils >/dev/null
+      - uses: actions/checkout@v4
+      - name: Dashboard tests (no browser)
+        run: cd dashboard && FLEETDASH_BROWSER=none python3 -m unittest discover -s tests -t .
+
+  dashboard-browser:
+    # Every dashboard page rendered in headless Chrome, which the runner image
+    # carries. A missing Chrome fails the job rather than skipping it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dashboard browser tests
+        run: cd dashboard && FLEETDASH_BROWSER=google-chrome python3 -m unittest discover -s tests/e2e -t .
+
+  shellcheck:
+    # Informational: gate on -S error only, and do not block while the
+    # existing warning debt is untriaged.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get -y install shellcheck >/dev/null
+      - name: shellcheck (errors only)
+        run: |
+          shellcheck -S error bin/*.sh hooks/*.sh lib/cc-config.sh tests/*.sh aws/bin/*.sh share/*.sh \
+            githooks/pre-commit githooks/post-merge githooks/post-checkout
+          # profile.d fragments are sourced by sh and carry no shebang
+          shellcheck -S error -s sh profile.d/*.sh

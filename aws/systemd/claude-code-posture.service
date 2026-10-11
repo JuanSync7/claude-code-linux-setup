@@ -1,0 +1,39 @@
+# claude-code-posture.service - apply this instance's Claude Code policy at boot.
+# [PLANNED - AWS VDI, not yet validated on an AMI. See docs/LOCAL-VS-AWS.md §8.]
+#
+# Install to /etc/systemd/system/, then: systemctl enable claude-code-posture.service
+#
+# Ordering: After=cloud-config.service, which is the stage that runs write_files
+# and therefore the stage that produces /etc/claude-code/posture. Deliberately
+# NOT cloud-final.service: cloud-final runs runcmd and package installs, and
+# since this unit is Before=systemd-user-sessions.service, ordering after
+# cloud-final would drag that whole stage in front of the login barrier and
+# block first-boot logins for as long as it takes.
+#
+# There is deliberately NO ConditionPathExists for the script: a failed CONDITION
+# leaves a unit inactive and reported as SUCCESS, so a missing script would
+# produce no policy and never appear in `systemctl --failed` - turning the
+# loudest failure into a silent one. Let ExecStart fail instead.
+#
+# Note Before= is ORDERING ONLY and does not make login depend on this unit.
+# The hard dependency lives in the systemd-user-sessions drop-in installed
+# alongside this file; without it a failure here is fail-OPEN (logins proceed
+# with no policy).
+[Unit]
+Description=Apply Claude Code managed-settings posture for this instance
+# No Documentation= : nothing installs this repo's docs onto a host, and a URI
+# pointing at a path that does not exist is what `systemd-analyze verify` flags.
+# The script's own header is the ground truth; the reasoning is aws/README.md.
+After=cloud-config.service local-fs.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cc-apply-posture.sh
+# The policy must be in place before logins. Do not proceed degraded, and do not
+# retry silently - a failure here should be visible in `systemctl --failed`.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+# cc-admins-admin-session - the scoped sudo grant for the admin helper.
+# [PLANNED - install ONLY on the ADMIN AMI, never on an engineer VDI or a
+# shared on-prem host without review. See docs/LOCAL-VS-AWS.md.]
+#
+# Install to /etc/sudoers.d/cc-admins-admin-session, root:root 0440, and validate
+# with `visudo -cf` BEFORE it takes effect - a syntax error here can lock out sudo.
+#
+# WHAT THIS GRANTS, AND WHAT IT DOES NOT
+# One command: members of the LDAP group cc-admins may run the hardened, logged
+# wrapper /usr/local/sbin/cc-admin-session.sh as root, with no password prompt.
+# It is an ALLOWLIST ENTRY, not general root - the wrapper runs the agent as the
+# invoker under the loose admin policy and stamps admin.log.
+#
+# HARD PRECONDITION: cc-admin-session.sh must enforce its target-user policy
+# (RUN_AS == invoker, never uid 0). Without it, `... -u root` turns this one-line
+# grant back into unrestricted root. Do not deploy this rule against a wrapper
+# that lacks it. Verify: the wrapper's header carries the "TARGET-USER POLICY"
+# block.
+#
+# NOPASSWD is deliberate: the engineer has no other sudo on the box, so there is
+# no blanket grant sitting next to this that a password would need to guard, and
+# a non-interactive admin task would otherwise hang on a prompt. If a password
+# step is ever wanted, change NOPASSWD: to PASSWD: - it authenticates the
+# invoker's own account via sssd/LDAP.
+#
+# NOTE docs/ADMIN-SESSION.md states the position for a shared host, where the
+# invoker may hold other sudo rights. Both positions are reconciled in
+# docs/LOCAL-VS-AWS.md §8.4; do not change one alone.
+#
+# NOSETENV is load-bearing, not decoration. cc-admin-session.sh's config loader
+# honours $CC_CONFIG_LIB FIRST in its search order and sources it as root
+# without validation. That is safe only while sudo's env_reset default strips
+# the variable; a site that adds `Defaults setenv` or a matching env_keep would
+# make `sudo CC_CONFIG_LIB=/tmp/evil.sh cc-admin-session.sh` arbitrary code as
+# root - full root through a different door than -u root, defeating the whole
+# point of a one-command allowlist. NOSETENV refuses the per-command override
+# regardless of the site default.
+%cc-admins ALL=(root) NOPASSWD:NOSETENV: /usr/local/sbin/cc-admin-session.sh

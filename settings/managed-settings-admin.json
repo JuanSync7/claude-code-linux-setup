@@ -1,0 +1,140 @@
+{
+  "_comment_1": "ADMIN POLICY - NOT the fleet policy. Deploy to /etc/claude-code-admin/managed-settings.json, root:root, mode 0644, directory 0700 root:root. It is NEVER read by an ordinary session; it is bind-mounted over /etc/claude-code inside a private mount namespace by /usr/local/sbin/cc-admin-session.sh. Every other user on the host continues to read the strict /etc/claude-code/managed-settings.json.",
+  "_comment_2": "Delta vs the fleet policy, four things. PERMISSION RULES: (1) the fleet policy's administrative denies are absent (sudo, su, dnf, yum, rpm, systemctl, firewall-cmd, useradd, usermod, passwd, curl, wget, nc, ncat, ssh, scp, rsync, aws, and the Read/Edit set) - that is the point of this file; this file also ADDS three denies the fleet policy does not need, Edit(//etc/claude-code/**), Edit(//etc/claude-code-admin/**) and Edit(//usr/local/sbin/cc-*), so an admin session cannot widen its own permissions mid-flight, and swaps the ask list (git remote/docker/podman out; rm -rf, dd, mkfs in). (2) allowManagedPermissionRulesOnly is false, so an admin can add session-scoped rules. NOT PERMISSION RULES: (3) forceLoginMethod is absent - see _comment_login, this is the one place on the host an account outside the company's organisation can sign in. (4) autoMode.environment and companyAnnouncements name the session as privileged. Everything else - audit hooks, secret guard, autoMode hard_deny, classifyAllShell, retention, telemetry, requiredMinimumVersion - is deliberately IDENTICAL, so an admin session is still fully logged. Sandbox is disabled here AND in the fleet policy (SANDBOX-DECISION.md), so it is not a delta; it also cannot be re-enabled for admin sessions alone, because it cannot nest and inside a user namespace root is remapped to nobody so setuid sudo refuses to run.",
+  "_comment_3": "ACCEPTED LOSS, fleet-wide rather than admin-only: with the sandbox disabled everywhere, no session on the host gets sandbox.network.strictAllowlist (network deny-by-default) or filesystem isolation. The only remaining network control is the autoMode classifier plus its hard_deny below - advisory-by-classifier, not enforced-by-kernel. CONSEQUENCE: with kernel enforcement gone, the fleet/admin boundary rests on agent-side permission rules, which a local user with no sudo can bypass entirely by bind-mounting their own policy over this path inside an unprivileged user namespace. Managed settings are therefore a guardrail against accident, NOT a boundary against intent, UNLESS unprivileged user namespaces are disabled on the host (user.max_user_namespaces=0). The reasoning and the fix are docs/LOCAL-VS-AWS.md 8.2 plus aws/sysctl.d/50-claude-code-userns.conf. Do not use an admin session for routine project work - use it for administration and exit it.",
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "_comment_bypass": "Left at 'disable' on purpose: with the denies below already removed you get a prompt, not a block, so admin work flows without also switching off the confirmation on genuinely destructive commands. If you want an unattended admin run, DELETE this key (do not set it to anything else) and set defaultMode to 'bypassPermissions'.",
+    "_comment_deny": "The fleet policy's administrative denies (sudo, su, dnf, yum, rpm, systemctl, firewall-cmd, useradd, usermod, passwd, curl, wget, nc, ncat, ssh, scp, rsync, aws) are ABSENT here by design - that is the point of this file. What remains is the credential and self-protection set: an admin still has no reason to have the agent read private keys, and blocking edits to this policy tree stops an admin session widening its own permissions mid-flight.",
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(//etc/shadow)",
+      "Edit(//etc/claude-code/**)",
+      "Edit(//etc/claude-code-admin/**)",
+      "Edit(//usr/local/sbin/cc-*)",
+      "Bash(chmod 777 *)"
+    ],
+    "ask": [
+      "Bash(rm -rf *)",
+      "Bash(dd *)",
+      "Bash(mkfs*)",
+      "Bash(git push *)"
+    ],
+    "additionalDirectories": []
+  },
+  "allowManagedPermissionRulesOnly": false,
+  "allowManagedHooksOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "disableSideloadFlags": true,
+  "_comment_customization": "IDENTICAL to the fleet policy, deliberately: the same granular array form (the shipped schema accepts true or an array naming the RESTRICTED types; the object form the vendor documents is silently ignored - SETTINGS-REFERENCE.md 3.4 records how that was verified). hooks and mcp stay plugin/managed-only here too - an admin session is the last place that should load someone's hook. skills and agents stay open, because an admin doing IT work needs the same repository skills (version-bump, repo-audit, fleet-drift ...) an engineer's session gets, and because skills and agents are instructions: they inherit this session's permission envelope and cannot widen it. Reasoning and the risk it accepts: SETTINGS-REFERENCE.md 3.4.",
+  "strictPluginOnlyCustomization": [
+    "hooks",
+    "mcp"
+  ],
+  "disableClaudeAiConnectors": true,
+  "_comment_egress_keys": "TWO KEYS THAT SEND CONTENT WITHOUT BEING A TOOL CALL, so no deny rule, classifier rule or sandbox setting reaches them - the same argument as the env block in SETTINGS-REFERENCE 3.8. autoUploadSessions:false stops local sessions being mirrored to claude.ai; a mirrored session is customer material leaving the fleet, and it is set rather than left at its default so that a default cannot drift under us. syncClaudeAiSkills:false stops skills a user enabled on their PERSONAL claude.ai account being downloaded into ~/.claude/skills/synced and re-synced; the key is honoured only as false, because the feature is enabled server-side per account, so leaving it unset leaves the sync running. Skills are instructions and cannot widen the session envelope - this closes the distribution channel, not a privilege. Do NOT achieve the same thing by adding skills to strictPluginOnlyCustomization: that would also shut this repository own skills.",
+  "autoUploadSessions": false,
+  "syncClaudeAiSkills": false,
+  "_comment_hooks": "IDENTICAL to the fleet policy. An admin session is the one that most needs an evidence trail, so the audit hook, the secret guard, the denial hook and the upgrade guard all stay wired. The upgrade guard matters here MORE than in the fleet policy: an admin session can actually run dnf, so a blind 'upgrade claude' would otherwise succeed and break the version pin - the signpost routes it to the gated procedure instead (OPERATIONS Part 7). cc-admin-session.sh additionally stamps session start/stop into /var/log/claude-code/admin.log.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-audit-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-upgrade-guard-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-secret-guard-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-redact-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Bash|Edit|Write|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/sbin/cc-denied-hook.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "_comment_sandbox": "DISABLED, deliberately. Three independent reasons: (a) the sandbox cannot nest - inside an enclosing user namespace bubblewrap cannot create another, so any agent/SDK/automation session dies on every Bash call with 'apply-seccomp: unshare(CLONE_NEWUSER): Invalid argument'; (b) inside the sandbox's userns root is remapped to nobody, so sudo refuses with '/etc/sudo.conf is owned by uid 65534' - unfixable while the sandbox is on; (c) where '~' expands to a symlink published by the directory service, bwrap cannot mount through it. An admin session exists precisely to do the work the sandbox forbids.",
+  "sandbox": {
+    "enabled": false
+  },
+  "_comment_automode": "hard_deny and classifyAllShell are identical to the fleet policy - the classifier is the only network-side control left once the sandbox is off, so it stays on in full. One entry in environment[] differs: it names the session as PRIVILEGED ADMINISTRATIVE and says it can install packages, edit system files and use sudo, so the classifier judges shell commands against what this session can actually do. Do not describe this block as identical to the fleet policy; it is identical apart from that one string.",
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "Organization: REPLACE-WITH-ORGANIZATION. Primary use: REPLACE-WITH-PRIMARY-USE",
+      "Cloud provider(s): REPLACE-WITH-CLOUD-PROVIDERS",
+      "Trusted internal domains: *.REPLACE-WITH-INTERNAL-DOMAIN",
+      "Internal storage: REPLACE-WITH-STORAGE-DESCRIPTION",
+      "Sensitive data locations & audiences: REPLACE-WITH-SENSITIVE-DATA-LOCATIONS",
+      "Additional context: PRIVILEGED ADMINISTRATIVE SESSION on REPLACE-WITH-HOST-DESCRIPTION. This session can install packages, edit system files and use sudo",
+      "Source control: not yet specified - the classifier therefore treats every source-control host as an untrusted destination until an entry is added here"
+    ],
+    "hard_deny": [
+      "$defaults",
+      "Never send customer data to any host outside REPLACE-WITH-INTERNAL-DOMAIN"
+    ],
+    "classifyAllShell": true
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /usr/local/share/claude-code/statusline.sh"
+  },
+  "autoUpdatesChannel": "stable",
+  "requiredMinimumVersion": "2.1.236",
+  "_comment_login": "forceLoginMethod is deliberately ABSENT here (the fleet policy pins it to claudeai). An admin needs to be able to switch accounts, test an org pin before rolling it out, and log in as a different identity to reproduce a user's problem. CONSEQUENCE, ACCEPTED: the admin session is the one place on the host where an account outside the company's organisation can sign in. That is bounded by the fact that only cc-admins can open the session at all, and every start is recorded in /var/log/claude-code/admin.log.",
+  "cleanupPeriodDays": 90,
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_FEEDBACK_COMMAND": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"
+  },
+  "companyAnnouncements": [
+    "*** PRIVILEGED ADMIN SESSION *** Sandbox is OFF and administrative commands are permitted. This session is logged to /var/log/claude-code/. Exit it as soon as the administrative task is done."
+  ],
+  "disableRemoteControl": true
+}

@@ -1,0 +1,31 @@
+# Weekly: is a Claude Code version above our pin published?
+#
+# The script installs nothing and moves no package - it asks the vendor
+# repository a question and files the answer. It exits 1 when a newer version
+# EXISTS, which marks this unit failed on purpose: `systemctl --failed` is then
+# the notice board, the same idiom claude-code-healthcheck.service uses.
+#
+# That idiom has a known gap: a failed unit reports to nobody unless somebody
+# looks. OnFailure= below is where an alert route is
+# attached; it is deliberately left commented out, because delivery is a network
+# write with a named owner and this repository proposes rather than applies.
+#
+# Install: bin/cc-install.sh --apply places this and enables the timer.
+
+[Unit]
+Description=Claude Code version watch (is anything published above our pin?)
+# Documentation: docs/OPERATIONS.md in the checkout this host was deployed from. Not a
+# Documentation= line: no path to it is the same on every host, and a dead
+# link in `systemctl status` is worse than none.
+After=network-online.target
+Wants=network-online.target
+#OnFailure=claude-code-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cc-version-watch.sh
+StandardOutput=journal
+StandardError=journal
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=10min

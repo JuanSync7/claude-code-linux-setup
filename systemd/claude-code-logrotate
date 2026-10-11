@@ -1,0 +1,107 @@
+# /etc/logrotate.d/claude-code
+#
+# cc-healthcheck.sh appends to its report on every run, and the timer runs daily,
+# so without this the file grows unbounded on a long-lived instance. cc-update.sh
+# and cc-audit.sh write here too.
+#
+# Install: sudo install -o root -g root -m 0644 \
+#            systemd/claude-code-logrotate /etc/logrotate.d/claude-code
+# Verify:  sudo logrotate -d /etc/logrotate.d/claude-code
+
+/var/log/claude-code/healthcheck.log
+/var/log/claude-code/update.log
+{
+    weekly
+    rotate 26
+    # 26 weeks keeps six months of health history, which is enough to show a
+    # drift pattern across two or three version bumps.
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # The scripts open the log fresh on each run and exit, rather than holding a
+    # descriptor open, so `create` is correct here and no signal or restart is
+    # needed after rotation. copytruncate would be redundant - and specifying both
+    # is contradictory, since copytruncate makes logrotate ignore create.
+    create 0640 root root
+}
+
+# THE EVIDENCE LOGS. The activity and denial hooks append as the ENGINEER, into
+# per-user files (0600 <user>:users) inside 1733 directories. That ownership is
+# the whole design - one user cannot read another's record - and it dictates the
+# rotation method:
+#
+#   copytruncate, NOT create.
+#
+# `create` would replace each rotated file with a fresh root-owned one, and the
+# next hook invocation - running as the engineer, not as root - could not append
+# to it. The audit trail would stop, silently, with no error anywhere: exactly
+# the failure mode this deployment exists to prevent. copytruncate keeps the
+# inode, so ownership and mode survive and the hook keeps writing. The cost is a
+# theoretical entry lost in the copy window; for an append-only evidence log that
+# is the right trade.
+#
+# Without this stanza these two directories grow unbounded, one record per tool
+# call per user, on the root filesystem.
+/var/log/claude-code/activity/*.jsonl
+/var/log/claude-code/denied/*.jsonl
+{
+    weekly
+    rotate 52
+    # A year of evidence. Longer than the health history above because these are
+    # the records that answer "what did the agent do in a customer project", and
+    # cleanupPeriodDays only keeps the user-side transcripts for 90 days.
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    # `su root root` is REQUIRED here, and for a reason that has nothing to do
+    # with creating files. logrotate refuses outright to touch a log whose PARENT
+    # DIRECTORY is group- or world-writable unless told which identity to act as
+    # - and these directories are 1733 by design, world-writable so that any
+    # engineer can append their own record. Without this line logrotate skips
+    # every file with "parent directory has insecure permissions" and exits 1, so
+    # the stanza reads as deployed while rotating nothing. That copytruncate
+    # creates nothing, and so needs no owner, does not exempt it: the safety
+    # check is about the directory, not about creation.
+    #
+    # Rotating AS root is correct: root already owns the directory, and the live
+    # file keeps its inode, owner and mode under copytruncate, so the engineer
+    # keeps appending to it. The rotated copy becomes root-owned, which for an
+    # audit trail is a small improvement rather than a loss.
+    su root root
+    # Still no `create`: it would hand the live file to root and silently stop
+    # the hook writing. Do not "tidy" that back in - see the note above.
+}
+
+# THE ADMIN-SESSION LOG. cc-admin-session.sh appends one line per privileged
+# launch or refusal, as root, opening the file fresh each time - so `create` is
+# correct. 0640, never world-readable: it names who held privilege and when
+# (cc-admin-session.sh stamps it 0640 too). It grows slowly,
+# but it is evidence of who held privilege and when, so it gets the same two
+# years as the audit reports below rather than being left to grow forever.
+/var/log/claude-code/admin.log {
+    monthly
+    rotate 24
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
+
+# NOT HERE, deliberately: reports/ is pruned by cc-report.sh itself (--keep,
+# docs/REPORTING.md), and version-watch.json is rewritten whole on each run.
+
+# Audit reports are individually timestamped files, not an appended log, so they
+# are rotated by age rather than by size.
+/var/log/claude-code/audit-*.txt {
+    monthly
+    rotate 24
+    compress
+    missingok
+    notifempty
+    # Audit reports are change-record evidence. Two years is a deliberate choice;
+    # align it with whatever retention your change-management policy requires.
+}

@@ -1,0 +1,44 @@
+{
+  "placeholders": {
+    "REPLACE-WITH-ORGANIZATION": {
+      "meaning": "The organisation's name, as the session banner and the auto-mode environment should state it",
+      "example": "Example Organisation"
+    },
+    "REPLACE-WITH-PRIMARY-USE": {
+      "meaning": "One phrase for what the fleet is used for - the auto-mode classifier reads it to judge what is in scope",
+      "example": "software engineering"
+    },
+    "REPLACE-WITH-CLOUD-PROVIDERS": {
+      "meaning": "The cloud providers your work legitimately talks to, or none",
+      "example": "none"
+    },
+    "REPLACE-WITH-STORAGE-DESCRIPTION": {
+      "meaning": "One phrase for where project data lives (for example: shared network filesystems under a project root)",
+      "example": "shared network filesystems under a project root"
+    },
+    "REPLACE-WITH-INTERNAL-DOMAIN": {
+      "meaning": "Your internal DNS domain - hosts under it are treated as inside the organisation",
+      "example": "corp.example"
+    },
+    "REPLACE-WITH-SITE-NAME": {
+      "meaning": "A short name for this deployment, used where the tooling labels its own output",
+      "example": "example-site"
+    },
+    "REPLACE-WITH-SUPPORT-EMAIL": {
+      "meaning": "The address a blocked engineer is told to write to",
+      "example": "it-support@example.org"
+    },
+    "REPLACE-WITH-BANNER-ART": {
+      "meaning": "The banner shown at session start - plain text, or your own art",
+      "example": "Example Organisation"
+    },
+    "REPLACE-WITH-SENSITIVE-DATA-LOCATIONS": {
+      "meaning": "Where the site's sensitive data lives and who may see it, as one phrase. The auto-mode classifier reads it to judge whether an action exposes that data",
+      "example": "customer deliverables under /projects, shared only within the assigned project team"
+    },
+    "REPLACE-WITH-HOST-DESCRIPTION": {
+      "meaning": "One phrase describing the host and the data it holds, beginning with an article. The auto-mode classifier reads it as context for every decision",
+      "example": "a shared multi-user Linux workstation holding customer data under NDA"
+    }
+  }
+}

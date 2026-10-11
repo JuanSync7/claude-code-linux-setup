@@ -1,0 +1,21 @@
+[Unit]
+Description=Claude Code host health and policy drift check
+# Documentation: docs/OPERATIONS.md in the checkout this host was deployed from. Not a
+# Documentation= line: no path to it is the same on every host, and a dead
+# link in `systemctl status` is worse than none.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script also renders the run as a Prometheus textfile at CC_METRICS_FILE
+# from config.sh (empty: none). It writes nothing, and says so, when that
+# directory does not exist (docs/REPORTING.md 6), so it costs nothing on a host
+# with no exporter. ExecStart carries no path argument: the config is the one
+# place the path is written.
+ExecStart=/usr/local/sbin/cc-healthcheck.sh
+# A non-zero exit marks the unit failed, so `systemctl --failed` and any
+# existing monitoring that watches unit state will surface it without extra glue.
+StandardOutput=journal
+StandardError=journal
+Nice=10

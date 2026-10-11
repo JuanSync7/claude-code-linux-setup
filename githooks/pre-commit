@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# pre-commit — stop credentials and machine-generated dumps entering git history.
+#
+# WHY THIS EXISTS. The config file of a directory client (/etc/nslcd.conf) can
+# hold a cleartext bind password, an ~/.aws/credentials file holds keys, and a
+# Claude Code session transcript records the whole content of every file the
+# session read. Paste one of those into the repo, push, and it is in history
+# permanently: a commit cannot be taken back once it has been fetched. The
+# internal/ register may describe a site's findings in words; this guard is
+# aimed at the values themselves.
+#
+# WHAT IT CHECKS — staged content only, never the working tree:
+#   1. blocked filenames    - files that are secrets by nature
+#   2. private key blocks   - PEM headers
+#   3. credential values    - assignment-shaped, not the bare word
+#   4. config-file dumps    - an nslcd.conf recognised by its shape
+#   5. oversized files      - transcripts and binaries
+#   6. config.sh            - gitignored site config, force-added by mistake
+#
+# It deliberately matches VALUES, not vocabulary. A repository like this one legitimately
+# discusses words such as `bindpw` and `password` in its documents and deny
+# rules; a guard that blocked those words would block every edit to its
+# registers and would be turned off within a week. CI runs it over the
+# whole tree (CC_SCAN_ALL=1), so a false positive there turns the build red.
+#
+# Install (once per clone — git does not do this for you, by design):
+#     bin/cc-repo-setup.sh
+#
+# Override, if you are certain:  git commit --no-verify
+# That is a decision, not a formality. If you are reaching for it because the
+# guard is wrong, fix the guard instead so the next person is protected too.
+
+set -uo pipefail
+
+RED=$'\033[31m'; YEL=$'\033[33m'; OFF=$'\033[0m'
+[ -t 2 ] || { RED=""; YEL=""; OFF=""; }
+
+fail=0
+note() { printf '%s  BLOCKED%s %s\n' "$RED" "$OFF" "$1" >&2; fail=1; }
+hint() { printf '           %s\n' "$1" >&2; }
+
+# Staged, added/copied/modified only. -z for paths with spaces.
+# CC_SCAN_ALL=1 scans every tracked file instead — same checks, whole tree.
+# That is the CI entry point (bin/cc-ci-check.sh): a clone that skipped
+# cc-repo-setup.sh has no local guard, so the remote re-runs this one.
+if [ "${CC_SCAN_ALL:-0}" = "1" ]; then
+  mapfile -d '' staged < <(git ls-files -z)
+else
+  mapfile -d '' staged < <(git diff --cached --name-only --diff-filter=ACM -z)
+fi
+[ "${#staged[@]}" -eq 0 ] && exit 0
+
+MAXBYTES=$((512 * 1024))   # several times the largest legitimate file in this repo
+
+for f in "${staged[@]}"; do
+  [ -n "$f" ] || continue
+
+  # --- 1. filenames that are secrets by nature -------------------------------
+  case "$f" in
+    *nslcd.conf|*nsswitch.conf.bak*|*/shadow|shadow|*/gshadow|gshadow)
+      note "$f — system auth config"
+      hint "nslcd.conf holds a cleartext bind password, and a commit is permanent." ;;
+    *id_rsa|*id_dsa|*id_ecdsa|*id_ed25519|*.pem|*.pfx|*.p12|*.kdbx|*.jks)
+      note "$f — private key or keystore" ;;
+    *.jsonl)
+      note "$f — looks like a Claude Code session transcript"
+      hint "Transcripts record whole file contents, including anything read from /etc." ;;
+    .env|*/.env|*.env.local|*/credentials|*/.netrc|.netrc|*/.pgpass|.pgpass|*.htpasswd)
+      note "$f — credential file" ;;
+    */.ssh/*|.ssh/*)
+      note "$f — inside an .ssh directory" ;;
+    config.sh)
+      note "config.sh — gitignored site configuration, force-added"
+      hint "Commit config.example.sh instead. config.sh stays local to each host." ;;
+  esac
+
+  # Binary or unreadable-as-text: skip content checks, but still size-check.
+  blob=":$f"
+  size=$(git cat-file -s "$(git rev-parse ":$f" 2>/dev/null)" 2>/dev/null || echo 0)
+
+  # --- 5. oversized ----------------------------------------------------------
+  if [ "$size" -gt "$MAXBYTES" ]; then
+    note "$f — $((size / 1024)) KB exceeds the ${MAXBYTES}-byte limit"
+    hint "Nothing legitimate here is that large. A multi-MB text file is almost"
+    hint "always a transcript, a log, or a binary that belongs in the RPM instead."
+  fi
+
+  # Only scan text.
+  if git show "$blob" 2>/dev/null | head -c 8000 | grep -qI '' 2>/dev/null; then
+    content=$(git show "$blob" 2>/dev/null) || continue
+  else
+    continue
+  fi
+
+  # --- 2. PEM private key blocks -------------------------------------------
+  if printf '%s' "$content" | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+    note "$f — contains a PEM private key block"
+  fi
+
+  # --- 3a. known token formats, no key name required -----------------------
+  # These are unambiguous and near-zero false positive, so they are checked
+  # first and independently. A leaked access token for the git remote is the
+  # most likely accident in a repository that is pushed.
+  tok=$(printf '%s' "$content" | grep -nEo \
+    'gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]+' \
+    | head -3)
+  if [ -n "$tok" ]; then
+    note "$f — contains a recognised access-token format"
+    printf '%s\n' "$tok" | sed 's/^/             /' >&2
+    hint "A token in git history is compromised even after deletion. Revoke it."
+  fi
+
+  # --- 3b. assignment-shaped credential values -----------------------------
+  # Matches a VALUE, not a word. This repository legitimately discusses
+  # `bindpw` and `password` in its registers and deny rules, so vocabulary
+  # matching would block every edit to them.
+  #
+  # The value charset deliberately EXCLUDES * < > $ { } ( ) so that a glob
+  # (`Read(**/*password*)`), a placeholder (`<REPLACE-WITH-UUID>`) or a shell
+  # expansion (`${CC_PASSWD}`) cannot match as a value in the first place.
+  # Excluding the characters from the value is narrower than skipping any LINE
+  # that contains them: a line-level skip exempts every line with an asterisk
+  # anywhere, and an exclusion on a word such as EXAMPLE lets
+  # `AWS_SECRET_ACCESS_KEY=...EXAMPLE` through.
+  #
+  # Requires >=12 chars containing BOTH a letter and a digit, which is what
+  # separates a credential from a filesystem path.
+  hits=$(printf '%s' "$content" \
+    | grep -nEi '(bindpw|passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential)[A-Za-z_]*[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9!@#%^&+/._-]{12,}' \
+    | grep -E '[=:][[:space:]]*["'"'"']?[^[:space:]]*[A-Za-z][^[:space:]]*[0-9]|[=:][[:space:]]*["'"'"']?[^[:space:]]*[0-9][^[:space:]]*[A-Za-z]' \
+    | grep -viE 'CC_PASSWD|/etc/passwd|/etc/shadow|PASSWD:|NOPASSWD|REDACTED|PLACEHOLDER|CHANGEME|REPLACE[_-]WITH|YOUR[_-]|xxxxx' \
+    | head -3)
+  if [ -n "$hits" ]; then
+    note "$f — credential-shaped value assigned"
+    printf '%s\n' "$hits" | sed 's/^/             /' >&2
+  fi
+
+  # --- 4. a config file recognised by its shape, not its name --------------
+  # Catches an nslcd.conf pasted into a markdown fence or renamed.
+  if printf '%s' "$content" | grep -qE '^[[:space:]]*binddn[[:space:]]' \
+  && printf '%s' "$content" | grep -qE '^[[:space:]]*bindpw[[:space:]]+[^[:space:]]'; then
+    note "$f — contains a binddn/bindpw pair: an LDAP bind credential"
+    hint "Describe the finding in words; never paste the file. A bind password in history must be rotated."
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n%sCommit refused.%s Remove the content above, or if the guard is wrong,\n' "$YEL" "$OFF" >&2
+  printf 'fix githooks/pre-commit so the next person benefits. Deliberate override:\n' >&2
+  printf '    git commit --no-verify\n\n' >&2
+  exit 1
+fi
+exit 0

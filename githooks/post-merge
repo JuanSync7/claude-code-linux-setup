@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# post-merge — reassert ownership and modes after a pull.
+#
+# Git records exactly one permission bit: owner-execute. Not the group, not the
+# setgid bit, not internal/'s 2770. So a pull that creates a file gives it the
+# puller's umask, and a new directory loses the setgid bit, which is the entire
+# group-inheritance mechanism on a share without ACL tooling.
+#
+# The visible symptom is a colleague unable to edit a file you just pulled. The
+# invisible one is a findings document under internal/ becoming readable by
+# every account that can reach the share.
+#
+# This runs automatically so it does not depend on anyone remembering. It is
+# ADVISORY: it never fails the merge, because a permissions warning must not
+# leave someone with a half-completed pull.
+#
+# Only relevant while the repository lives on shared storage. Where each person
+# clones into their own home -- the normal git model -- CC_REPO_GROUP is empty
+# and cc-repo-perms.sh has nothing to do.
+
+set -uo pipefail
+repo="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -x "$repo/bin/cc-repo-perms.sh" ] || exit 0
+
+# Quiet no-op when there is nothing to do, which is the common case.
+if out=$("$repo/bin/cc-repo-perms.sh" 2>&1) && printf '%s' "$out" | grep -q 'Nothing to change'; then
+  exit 0
+fi
+
+printf '\n  cc-repo-perms: correcting ownership/modes after merge\n'
+"$repo/bin/cc-repo-perms.sh" --apply 2>&1 | sed 's/^/  /' || {
+  printf '  cc-repo-perms: could not correct permissions -- run it by hand:\n'
+  printf '      bin/cc-repo-perms.sh\n'
+}
+exit 0

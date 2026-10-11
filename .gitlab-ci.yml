@@ -1,0 +1,37 @@
+# CI for the Claude Code control plane — GitLab side.
+#
+# Same contract as .github/workflows/ci.yml: every content check lives in
+# bin/cc-ci-check.sh, called here and there, so the platforms cannot drift.
+#
+# PREREQUISITE: this file does nothing until a runner with the docker executor
+# is registered on the GitLab instance (Admin Area -> Runners, or a
+# project-specific runner). A repository with a .gitlab-ci.yml and no runner
+# shows pipelines stuck "pending" forever - that is the symptom.
+
+image: rockylinux:8
+
+stages: [check, test]
+
+default:
+  before_script:
+    - dnf -y install git make python36 findutils >/dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+checks:
+  stage: check
+  script:
+    - bash bin/cc-ci-check.sh
+
+test-suite:
+  stage: test
+  # Gating, as root in the container - mirror of the GitHub job.
+  script:
+    - dnf -y install procps-ng logrotate diffutils >/dev/null
+    - bash tests/test-cc-scripts.sh
+
+dashboard:
+  stage: test
+  # The image has no browser: the browser tests are skipped by name. They run
+  # gating on GitHub, whose runner carries Chrome.
+  script:
+    - cd dashboard && FLEETDASH_BROWSER=none python3 -m unittest discover -s tests -t .

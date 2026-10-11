@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Claude Code health check daily
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+# Spread the load if this is ever templated across several instances.
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
