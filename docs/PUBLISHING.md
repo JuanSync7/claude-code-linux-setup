@@ -126,10 +126,13 @@ nothing to scan against and passes. In the site edition, which may name its own 
 from forks receive no secrets, so the job skips there and the scan runs again on the merge push.
 
 ```
-python3 -c 'import json,os; print("\n".join(json.load(open(os.path.expanduser("~/.config/cc-publish/site.json")))["deny"]))' \
+python3 -c 'import json,os; m=json.load(open(os.path.expanduser("~/.config/cc-publish/site.json"))); print("\n".join(m["deny"] + [r[0] for r in m["replace"]]))' \
   | gh secret set PUBLISH_DENYLIST -R <owner>/<public-repo>
 gh variable set PUBLISH_SCAN --body required -R <owner>/<public-repo>
 ```
+
+The secret holds what the publisher's own scan denies: the `deny` terms and every `replace`
+source string (§2). Set it again whenever the map changes.
 
 A repository secret, not an environment secret: environments add approval gates around a
 deployment, and this job deploys nothing.
