@@ -3,7 +3,7 @@
 | File | What it is |
 | --- | --- |
 | `index.html` | The shell: sidebar of pages, empty main pane |
-| `app.js` | Fetches the API and builds each page; every value goes in as text, never HTML |
+| `app.js` | Takes the login token from the address, fetches the API with it and builds each page, including the Markdown reader for Docs; every value goes in as text, never HTML |
 | `style.css` | The whole visual system: palette, type, layout |
 | `favicon.svg` | The mark |
 

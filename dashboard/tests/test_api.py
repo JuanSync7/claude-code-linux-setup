@@ -276,19 +276,9 @@ class Server(unittest.TestCase):
 
     def test_no_token_is_refused_because_loopback_is_shared(self):
         self.assertEqual(self.get("/api/overview", headers={})[0], 403)
-        self.assertEqual(self.get("/", headers={"X-Fleetdash-Token": "wrong"})[0], 403)
-
-    def test_the_token_in_the_url_becomes_a_cookie(self):
-        req = urllib.request.Request("http://127.0.0.1:%d/?token=t0ken" % self.port)
-        try:
-            urllib.request.build_opener(NoRedirect).open(req, timeout=5)
-            self.fail("expected a redirect")
-        except urllib.error.HTTPError as e:
-            self.assertEqual(e.code, 303)
-            self.assertEqual(e.headers["Location"], "/")
-            cookie = e.headers["Set-Cookie"]
-        self.assertIn("HttpOnly", cookie)
-        self.assertEqual(self.get("/api/overview", headers={"Cookie": cookie.split(";")[0]})[0], 200)
+        self.assertEqual(self.get("/api/status", headers={"X-Fleetdash-Token": "wrong"})[0], 403)
+        # not bytes a header can be compared as: refused, not a crash
+        self.assertEqual(self.get("/api/status", headers={"X-Fleetdash-Token": "t\u00f8ken"})[0], 403)
 
     def test_a_foreign_host_header_is_refused(self):
         self.assertEqual(self.get("/api/overview", headers={

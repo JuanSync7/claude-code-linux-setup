@@ -335,7 +335,7 @@ class IngestRefusesHostileFiles(unittest.TestCase):
         ingest.LINE_MAX, ingest.CHUNK = 1 << 16, 1 << 16
         tracemalloc.start()
         try:
-            got = list(ingest._complete_lines(Endless(), 0))
+            got = list(ingest.complete_lines(Endless(), 0))
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()

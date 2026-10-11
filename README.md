@@ -208,7 +208,7 @@ systemd/     -> /etc/systemd/system          0644  timer, units, resource limits
 aws/         -> (image build, not this repo)       AMI/VDI: posture selector, userns sysctl, scoped sudoers
 githooks/                                          pre-commit guard; post-merge + post-checkout perms
 tests/                                             self-tests for the cc-* scripts
-dashboard/   (not installed yet)                   read-only web dashboard over the logs; its own README
+dashboard/   (its own installer, own account)       web dashboard over the logs; its own README
 publish/                                           what the public template edition adds; docs/PUBLISHING.md
 docs/                                              how to run it. Ships with the release
 internal/                                          the record. 2770, group-only

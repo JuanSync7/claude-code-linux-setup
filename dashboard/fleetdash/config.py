@@ -15,9 +15,18 @@ KEYS = {
     "host_label": str,             # label shown in the header, never a real host name in docs
     "bind": str,                   # loopback only: there is no TLS
     "port": int,                   # 0 picks a free port
-    "transcript_glob": str,        # glob of ~/.claude/projects directories
+    "transcript_glob": str,        # glob of ~/.claude/projects directories; "" reads no home directly
     "user_from_path": str,         # regex; group 1 is the user name in a transcript path
-    "hook_log_dir": str,           # holds activity/<user>.jsonl and denied/<user>.jsonl
+    "hook_log_dir": str,           # holds activity/<user>.jsonl and denied/<user>.jsonl; "" reads none
+    "spool": str,                  # directory people's feed batches arrive in; "" for no feed
+    "feed": dict,                  # {transcripts, state_dir}: what `feed` reads and where it keeps its place; ~ is the caller's home
+    "token_file": str,             # where serve keeps its login token between starts; "" for a new one each start
+    "claude_bin": str,             # the claude binary a check-in asks for its version; "" for version unknown
+    "policy": dict,                # {deployed, source}: the policy this host holds, and the one the fleet should hold
+    "host_stale_hours": int,       # a host not heard from for this long is shown as stale
+    "docs": list,                  # [{label, path}]: directories of documents the Docs page shows
+    "actions": list,               # [{id, label, about, argv, cwd, timeout_s}]: the only commands the Update page can run
+    "install": dict,               # {account, python, code_dir, config_file, units_dir, ingest_interval, prune_calendar}
     "verify_file_owner": bool,     # refuse a hook log or transcript not owned by the user it is for
     "bedrock_model_pattern": str,  # regex on the model id that marks a Bedrock call
     "prices_per_mtok": dict,       # model-family prefix -> USD per million tokens
@@ -26,7 +35,19 @@ KEYS = {
     "under_use": dict,             # {idle_days, median_fraction}: when the People page flags a person
 }
 PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
-LOOPBACK = ("127.0.0.1", "::1", "localhost")
+# Each nested table's keys and their types: exactly these, like the top level.
+SHAPES = {
+    "feed": {"transcripts": str, "state_dir": str},
+    "policy": {"deployed": str, "source": str},
+    "install": {"account": str, "python": str, "code_dir": str, "config_file": str, "units_dir": str,
+                "ingest_interval": str, "prune_calendar": str},
+}
+ROW_SHAPES = {
+    "docs": {"label": str, "path": str},
+    "actions": {"id": str, "label": str, "about": str, "argv": list, "cwd": str, "timeout_s": int},
+}
+# the server listens on IPv4 only
+LOOPBACK = ("127.0.0.1", "localhost")
 
 
 def load(path):
@@ -66,6 +87,24 @@ def load(path):
     for sev, row in cfg["retention"].items():
         if not isinstance(row, dict) or sorted(row) != ["days", "max_rows"]:
             raise ConfigError("retention[%s] needs exactly days, max_rows" % sev)
+    for key, shape in SHAPES.items():
+        _shape(key, cfg[key], shape)
+    for key, shape in ROW_SHAPES.items():
+        for i, row in enumerate(cfg[key]):
+            _shape("%s[%d]" % (key, i), row, shape)
+        names = [row["label" if key == "docs" else "id"] for row in cfg[key]]
+        if len(set(names)) != len(names):
+            raise ConfigError("%s names the same entry twice" % key)
+    for a in cfg["actions"]:
+        # the id goes into a URL and the argv into exec: neither is ever built from a request
+        if not a["id"] or not a["id"].replace("-", "").isalnum():
+            raise ConfigError("actions id %r must be letters, digits and hyphens" % a["id"])
+        if not a["argv"] or not all(isinstance(x, str) and x for x in a["argv"]):
+            raise ConfigError("actions[%s].argv must be a list of non-empty strings" % a["id"])
+        if a["timeout_s"] < 1:
+            raise ConfigError("actions[%s].timeout_s must be at least 1" % a["id"])
+    if cfg["host_stale_hours"] < 1:
+        raise ConfigError("host_stale_hours must be at least 1")
     u = cfg["under_use"]
     if sorted(u) != ["idle_days", "median_fraction"]:
         raise ConfigError("under_use needs exactly idle_days, median_fraction")
@@ -75,3 +114,11 @@ def load(path):
             or not 0 <= u["median_fraction"] <= 1):
         raise ConfigError("under_use.median_fraction must be between 0 and 1")
     return cfg
+
+
+def _shape(name, value, shape):
+    if not isinstance(value, dict) or sorted(value) != sorted(shape):
+        raise ConfigError("%s needs exactly %s" % (name, ", ".join(sorted(shape))))
+    for key, kind in shape.items():
+        if not isinstance(value[key], kind) or (kind is int and isinstance(value[key], bool)):
+            raise ConfigError("%s.%s must be %s" % (name, key, kind.__name__))

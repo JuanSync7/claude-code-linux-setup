@@ -3,10 +3,13 @@
 Unknown stays distinct from zero: a model with no row in the price table makes
 the total cost None ("unpriced"), never a smaller number that looks complete.
 """
+import csv
 import datetime
+import io
+import json
 import re
 
-from fleetdash import store
+from fleetdash import ingest, store
 from fleetdash.vocab import CATEGORIES, SEVERITIES
 
 MONTH_DAYS = 30.0
@@ -30,6 +33,16 @@ def _price(cfg, model):
         if name.startswith(family) and (best is None or len(family) > len(best)):
             best = family
     return cfg["prices_per_mtok"][best] if best else None
+
+
+def status(cfg):
+    """What the frame around every page shows: which site, and how fresh."""
+    con = store.connect(cfg)
+    try:
+        last = con.execute("select v from meta where k='last_ingest'").fetchone()
+    finally:
+        con.close()
+    return {"host_label": cfg["host_label"], "last_ingest": last["v"] if last else None}
 
 
 def overview(cfg, days=30, now=None):
@@ -56,8 +69,10 @@ def overview(cfg, days=30, now=None):
         storage = con.execute("select count(*) n, coalesce(sum(bytes),0) b, count(distinct user) u "
                               "from sessions").fetchone()
         last = con.execute("select v from meta where k='last_ingest'").fetchone()
+        heard = [r[0] for r in con.execute("select last_seen from hosts")]
     finally:
         con.close()
+    stale_before = _stale_before(cfg, now)
 
     providers, priced, unpriced = {}, 0.0, []
     model_rows = []
@@ -94,6 +109,7 @@ def overview(cfg, days=30, now=None):
         "severity_counts": {s: counts.get(s, 0) for s in SEVERITIES},
         "blocks": [{"source": r["source"] or "(unnamed)", "count": r["n"]} for r in blocks],
         "storage": {"sessions": storage["n"], "bytes": storage["b"], "users": storage["u"]},
+        "hosts": {"count": len(heard), "stale": len([t for t in heard if t[:19] < stale_before])},
     }
 
 
@@ -111,7 +127,7 @@ def events(cfg, user=None, severity=None, category=None, limit=200, offset=0):
     con = store.connect(cfg)
     try:
         total = con.execute("select count(*) from events" + clause, args).fetchone()[0]
-        rows = con.execute("select ts, user, session, severity, category, source, tool, detail "
+        rows = con.execute("select ts, user, session, severity, category, source, tool, detail, host "
                            "from events" + clause + " order by ts desc, key limit ? offset ?",
                            args + [limit, offset]).fetchall()
         # the tab counts ignore the category filter, so every tab stays visible
@@ -188,12 +204,27 @@ def people(cfg, days=30, now=None):
         limits = con.execute(
             "select user, detail, count(*) n, max(ts) last from events "
             "where category='rate-limit' and ts>=? group by user, detail", (since,)).fetchall()
+        by_model = con.execute(
+            "select user, model, sum(input) i, sum(output) o, sum(cache_read) cr, sum(cache_write) cw "
+            "from usage where ts>=? group by user, model", (since,)).fetchall()
     finally:
         con.close()
-    tier = {}
+    # a person's cost is unknown (None) as soon as one model they used has no price
+    usd = {}
+    for m in by_model:
+        p = _price(cfg, m["model"])
+        if p is None:
+            if m["i"] + m["o"] + m["cr"] + m["cw"]:
+                usd[m["user"]] = None
+        elif usd.get(m["user"], 0.0) is not None:
+            usd[m["user"]] = usd.get(m["user"], 0.0) + (
+                m["i"] * p["input"] + m["o"] * p["output"] + m["cr"] * p["cache_read"]
+                + m["cw"] * p["cache_write"]) / 1e6
+    tier, seat_usd = {}, {}
     for seat in cfg["seats"]:
         for u in seat["users"]:
-            tier.setdefault(u, seat["tier"])
+            if u not in tier:
+                tier[u], seat_usd[u] = seat["tier"], seat["monthly_usd"] * days / MONTH_DAYS
     hits = {}
     for r in limits:
         h = hits.setdefault(r["user"], {"five_hour": 0, "seven_day": 0, "other_limit": 0, "last_limit": None})
@@ -207,6 +238,7 @@ def people(cfg, days=30, now=None):
         row = {"user": user, "tier": tier.get(user),
                "tokens": u["tokens"] if u else 0, "sessions": u["sessions"] if u else 0,
                "active_days": u["active_days"] if u else 0, "last_active": last.get(user),
+               "usd": usd.get(user, 0.0), "seat_usd": seat_usd.get(user),
                "five_hour": 0, "seven_day": 0, "other_limit": 0, "last_limit": None}
         row.update(hits.get(user, {}))
         age = _age_days(now, row["last_active"])
@@ -221,3 +253,130 @@ def people(cfg, days=30, now=None):
         rows.append(row)
     rows.sort(key=lambda r: (-r["tokens"], r["user"]))
     return {"days": days, "rules": dict(rules), "median_tokens": median, "rows": rows}
+
+
+REPORT_COLUMNS = ("user", "tier", "tokens", "usd", "seat_usd", "sessions", "active_days", "last_active",
+                  "five_hour", "seven_day", "other_limit", "last_limit", "under_use")
+
+
+def people_csv(cfg, days=30, now=None):
+    """The People table as CSV, for a report. An unknown value is an empty
+    cell, never 0."""
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(REPORT_COLUMNS)
+    for r in people(cfg, days=days, now=now)["rows"]:
+        r = dict(r, under_use="; ".join(r["under_use"]))
+        w.writerow([_cell(r[c]) for c in REPORT_COLUMNS])
+    return out.getvalue()
+
+
+def _cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return "%.2f" % v
+    v = str(v)
+    # a spreadsheet runs a cell that starts like a formula; a name is whatever a log says
+    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
+def _stale_before(cfg, now):
+    return store.iso(_now(now) - datetime.timedelta(hours=cfg["host_stale_hours"]))
+
+
+def _version_key(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def hosts(cfg, days=30, now=None):
+    """One row per host that has checked in: when, which Claude Code, and
+    whether the policy it holds is the one the config says the fleet should.
+    A host that stopped checking in is stale; its figures are not zero."""
+    since, stale_before = _since(now, days), _stale_before(cfg, now)
+    expected = ingest.file_sha256(cfg["policy"]["source"])
+    con = store.connect(cfg)
+    try:
+        rows = con.execute("select * from hosts order by host").fetchall()
+        counts = {}
+        for r in con.execute("select host, severity, count(*) n from events where ts>=? and host!='' "
+                             "group by host, severity", (since,)):
+            counts.setdefault(r["host"], {})[r["severity"]] = r["n"]
+    finally:
+        con.close()
+    versions = [r["claude_version"] for r in rows if r["claude_version"]]
+    newest = max(versions, key=_version_key) if versions else None
+    out = []
+    for r in rows:
+        if r["policy_sha256"] is None or expected is None:
+            policy = "unknown"
+        else:
+            policy = "current" if r["policy_sha256"] == expected else "differs"
+        c = counts.get(r["host"], {})
+        out.append({"host": r["host"], "last_seen": r["last_seen"],
+                    "stale": r["last_seen"][:19] < stale_before,
+                    "claude_version": r["claude_version"],
+                    "version_behind": bool(r["claude_version"]) and r["claude_version"] != newest,
+                    "policy_sha256": r["policy_sha256"], "policy": policy, "reported_by": r["reported_by"],
+                    "events": {s: c.get(s, 0) for s in SEVERITIES}})
+    return {"days": days, "stale_hours": cfg["host_stale_hours"], "expected_policy_sha256": expected,
+            "newest_version": newest, "rows": out}
+
+
+RULE_KINDS = ("deny", "ask", "allow")
+
+
+def _policy_file(path):
+    """What one policy file says, reduced to what the page shows. state is
+    not-configured, missing, unreadable or ok."""
+    if not path:
+        return {"path": "", "state": "not-configured"}
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return {"path": path, "state": "missing"}
+    except OSError:
+        return {"path": path, "state": "unreadable"}
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        if not isinstance(doc, dict):
+            raise ValueError("not an object")
+        perms = doc.get("permissions", {})
+        # rules in a shape this cannot read are not "no rules"
+        if not isinstance(perms, dict) or not all(isinstance(perms.get(k, []), list) for k in RULE_KINDS):
+            raise ValueError("permissions is not lists of rules")
+    except (ValueError, RecursionError):
+        return {"path": path, "state": "unreadable"}
+    hooks = []
+    for event_name, groups in sorted((doc.get("hooks") if isinstance(doc.get("hooks"), dict) else {}).items()):
+        for g in groups if isinstance(groups, list) else []:
+            for hk in (g.get("hooks") if isinstance(g, dict) and isinstance(g.get("hooks"), list) else []):
+                if isinstance(hk, dict):
+                    hooks.append({"event": event_name, "matcher": ingest.text(g.get("matcher")),
+                                  "command": ingest.text(hk.get("command"))})
+    sandbox = doc.get("sandbox") if isinstance(doc.get("sandbox"), dict) else {}
+    enabled = sandbox.get("enabled")
+    return {"path": path, "state": "ok", "sha256": ingest.file_sha256(path),
+            "rules": {k: [ingest.text(x) for x in perms.get(k, [])] for k in RULE_KINDS},
+            "hooks": hooks,
+            "sandbox": enabled if isinstance(enabled, bool) else None,
+            # names only: a value here can be a proxy or a host
+            "env": sorted(doc["env"]) if isinstance(doc.get("env"), dict) else [],
+            "minimum_version": doc.get("requiredMinimumVersion") if isinstance(
+                doc.get("requiredMinimumVersion"), str) else None,
+            "keys": sorted(doc), "_doc": doc}
+
+
+def policy(cfg):
+    """The policy this host holds against the one the config says the fleet
+    should hold. Read-only: changing a policy is a merge request and a deploy."""
+    deployed, source = _policy_file(cfg["policy"]["deployed"]), _policy_file(cfg["policy"]["source"])
+    same, differs = None, []
+    if deployed["state"] == "ok" and source["state"] == "ok":
+        a, b = deployed["_doc"], source["_doc"]
+        differs = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+        same = deployed["sha256"] == source["sha256"]
+    for f in (deployed, source):
+        f.pop("_doc", None)
+    return {"deployed": deployed, "source": source, "same": same, "differs": differs}

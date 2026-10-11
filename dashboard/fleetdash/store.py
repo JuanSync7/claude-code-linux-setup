@@ -18,7 +18,8 @@ create table if not exists events (
     category text not null,
     source   text not null default '',  -- who decided: a rule, the classifier, a hook
     tool     text not null default '',
-    detail   text not null default ''
+    detail   text not null default '',
+    host     text not null default ''   -- the host whose hook logged it; '' when the source does not say
 );
 create index if not exists events_ts on events(ts);
 create index if not exists events_filter on events(user, severity, category);
@@ -40,14 +41,17 @@ create table if not exists usage (
 create index if not exists usage_ts on usage(ts);
 
 create table if not exists sessions (
-    path     text primary key,
+    path     text not null,
     user     text not null,
     project  text not null,
     session  text not null,
     bytes    integer not null,
     first_ts text,               -- NULL until a line with a timestamp is seen
     last_ts  text,
-    records  integer not null
+    records  integer not null,
+    -- keyed by user too: a path is whatever a feed batch says, and one
+    -- person naming another's file must not replace that person's row
+    primary key (user, path)
 );
 
 create table if not exists checkpoints (
@@ -55,6 +59,22 @@ create table if not exists checkpoints (
     inode      integer not null,
     generation integer not null,  -- bumped each time the file is seen rotated
     offset     integer not null
+);
+
+create table if not exists hosts (
+    host           text primary key,
+    last_seen      text not null,   -- when it last checked in
+    claude_version text,            -- NULL: the check-in could not read it
+    policy_sha256  text,            -- NULL: no policy file was readable there
+    reported_by    text not null    -- whose run carried the check-in
+);
+
+create table if not exists runs (
+    id        integer primary key autoincrement,
+    ts        text not null,
+    action    text not null,
+    exit_code integer,              -- NULL: stopped at its time limit
+    seconds   real not null
 );
 
 create table if not exists meta (k text primary key, v text not null);
@@ -66,7 +86,9 @@ ISO = "%Y-%m-%dT%H:%M:%S"
 #   2: usage keyed by (user, id); one rate-limit event per limit window
 #   3: every stored timestamp is UTC ISO 8601 and not in the future
 #   4: ...in ASCII digits only; a 3 store may hold other scripts' digits
-SCHEMA_VERSION = 4
+#   5: an event names its host and a hook-log key includes it; sessions keyed
+#      by (user, path); host check-ins and action runs have tables
+SCHEMA_VERSION = 5
 
 
 def connect(cfg):

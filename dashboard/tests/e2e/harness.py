@@ -11,6 +11,7 @@ import json
 import os
 import select
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -31,6 +32,13 @@ def cli(config, *args, timeout=120):
     p = subprocess.run([PY, "-m", "fleetdash", "-c", config] + list(args), cwd=ROOT,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     return p.returncode, p.stdout.decode(), p.stderr.decode()
+
+
+def free_port():
+    """A loopback port nothing holds right now, for a server that needs a fixed one."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def count(db, table):
@@ -67,6 +75,54 @@ def populated_fleet():
     return f
 
 
+GUIDE = """# Operator guide
+
+Read [the other page](sub/Other.md), [a file that is not listed](../secret.md) or [the web](https://example.com/x).
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | done |
+
+- first
+  - nested **bold**
+
+```
+make verify
+```
+
+<img src=x onerror=alert(1)> stays text.
+"""
+POLICY = {"permissions": {"deny": ["Bash(sudo:*)"], "ask": ["Bash(git push:*)"], "allow": ["Read"]},
+          "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/opt/hooks/audit"}]}]},
+          "sandbox": {"enabled": True}, "env": {"HTTPS_PROXY": "http://proxy.invalid:1"},
+          "requiredMinimumVersion": "2.1.0"}
+
+
+def full_config(f, **over):
+    """The fleet's config with everything the Hosts, Policy, Docs and Update
+    pages read: two documents and one in a second group, a deployed policy that differs from the source
+    in one setting, and one harmless action."""
+    docs = os.path.join(f.root, "docs")
+    os.makedirs(os.path.join(docs, "sub"), exist_ok=True)
+    other = "# The other page\n\nBack to [the guide](../Guide.md), on to [the goal](../../GOAL.md).\n"
+    for name, text in (("Guide.md", GUIDE), ("sub/Other.md", other)):
+        with open(os.path.join(docs, name), "w") as fh:
+            fh.write(text)
+    goal = os.path.join(f.root, "GOAL.md")
+    with open(goal, "w") as fh:
+        fh.write("# The goal\n")
+    deployed, source = os.path.join(f.root, "deployed.json"), os.path.join(f.root, "source.json")
+    with open(source, "w") as fh:
+        json.dump(POLICY, fh)
+    with open(deployed, "w") as fh:
+        json.dump(dict(POLICY, sandbox={"enabled": False}), fh)
+    cfg = dict(docs=[{"label": "Guides", "path": docs}, {"label": "Goal", "path": goal}], policy={"deployed": deployed, "source": source},
+               actions=[{"id": "say-hello", "label": "Say hello", "about": "Prints one line and changes nothing.",
+                         "argv": [PY, "-c", "print('hello from the action')"], "cwd": "", "timeout_s": 20}])
+    cfg.update(over)
+    return f.config(**cfg)
+
+
 class Server(object):
     """`fleetdash serve` in its own process. The URL with the token is the
     one line it prints to stderr; the token is read from there, as a person would."""
@@ -80,7 +136,7 @@ class Server(object):
             self.stop()
             raise AssertionError("serve printed no URL within %ds: %r" % (START_TIMEOUT, line))
         self.url = line[line.index("http://"):].strip()
-        self.base, _, self.token = self.url.partition("/?token=")
+        self.base, _, self.token = self.url.partition("/#token=")
 
     def get(self, path, headers=None, auth=True):
         hdrs = dict(headers or {})
@@ -93,6 +149,16 @@ class Server(object):
                 return r.status, r.headers, r.read()
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read()
+
+    def post(self, path, obj, headers=None):
+        hdrs = {"X-Fleetdash-Token": self.token, "Content-Type": "application/json"}
+        hdrs.update(headers or {})
+        req = urllib.request.Request(self.base + path, data=json.dumps(obj).encode(), headers=hdrs, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
 
     def json(self, path):
         status, _, body = self.get(path)
