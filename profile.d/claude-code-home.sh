@@ -1,4 +1,4 @@
-# /etc/profile.d/claude-code-home.sh — install root:root 0644
+# Installed as /etc/profile.d/claude-code-home.sh, root:root 0644
 #
 # WHY THIS EXISTS
 # A directory service can publish a home directory (/home/<user>) that is a

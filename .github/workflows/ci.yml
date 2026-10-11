@@ -23,8 +23,10 @@ jobs:
     steps:
       # git must be present BEFORE checkout, or actions/checkout falls back to
       # a tarball download and every `git ls-files` check below dies.
+      # diffutils is cmp: check [6] stages an install, and the installer
+      # refuses to run without it.
       - name: Install the fleet-parity toolset
-        run: dnf -y install git make python36 findutils >/dev/null
+        run: dnf -y install git make python36 findutils diffutils >/dev/null
       - uses: actions/checkout@v4
       - name: Trust the workspace (container UID != checkout UID)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

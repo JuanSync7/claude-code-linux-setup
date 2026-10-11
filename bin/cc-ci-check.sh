@@ -7,7 +7,7 @@
 # internal/'s 2770) — those do not exist in git; githooks/post-merge and
 # bin/cc-repo-perms.sh own that job, per checkout, forever.
 #
-# Runs unprivileged, from any clone. Needs: git, bash, python3, make.
+# Runs unprivileged, from any clone. Needs: git, bash, python3, make, cmp.
 # Both CI configs (.github/workflows/ci.yml, .gitlab-ci.yml) run these checks
 # by calling this script, so the checks cannot drift between platforms. The
 # test suites are separate gating jobs in the same configs.
@@ -237,6 +237,10 @@ if make -C "$ROOT6" quickstart DESTDIR="$STAGE" CONFIG=config.example.sh >/dev/n
   [ "$MISSING" -eq 0 ] && ok "guards passed and the staged tree holds the full manifest (hooks read from the Makefile)"
   # Whether every hook list names the same set is check [13] - it needs no staging.
 else
+  # The commonest cause on a minimal image is named, because the staging run's
+  # own message is not shown here.
+  command -v cmp >/dev/null 2>&1 \
+    || bad "cmp is not installed (package diffutils), and the installer refuses to run without it"
   bad "make quickstart DESTDIR=... failed - run it by hand for the refusal message"
 fi
 fi

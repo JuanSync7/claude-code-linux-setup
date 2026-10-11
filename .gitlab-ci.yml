@@ -14,7 +14,9 @@ stages: [check, test]
 
 default:
   before_script:
-    - dnf -y install git make python36 findutils >/dev/null
+    # diffutils is cmp: check [6] stages an install, and the installer
+    # refuses to run without it.
+    - dnf -y install git make python36 findutils diffutils >/dev/null
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
 
 checks:
@@ -26,7 +28,7 @@ test-suite:
   stage: test
   # Gating, as root in the container - mirror of the GitHub job.
   script:
-    - dnf -y install procps-ng logrotate diffutils >/dev/null
+    - dnf -y install procps-ng logrotate >/dev/null
     - bash tests/test-cc-scripts.sh
 
 dashboard:

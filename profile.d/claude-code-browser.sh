@@ -1,4 +1,4 @@
-# /etc/profile.d/claude-code-browser.sh — install root:root 0644
+# Installed as /etc/profile.d/claude-code-browser.sh, root:root 0644
 #
 # WHY THIS EXISTS
 # OAuth login opens a browser and completes through a short-lived callback on
