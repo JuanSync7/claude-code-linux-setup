@@ -225,17 +225,26 @@ def _file(con, cfg, path, user, reader, stats, cp_key):
             con.execute("insert or replace into checkpoints values (?,?,?,?)", (cp_key, st.st_ino, gen, end))
 
 
-def complete_lines(fh, offset):
+class Grew(Exception):
+    """A file went on past the size its reader allows."""
+
+
+def complete_lines(fh, offset, most=None):
     """Yield (start, end, bytes) for each newline-terminated line past offset.
     A trailing line with no newline is still being written: leave it. A line
     longer than LINE_MAX is yielded as None once its newline arrives, and is
-    not held in memory while it grows."""
+    not held in memory while it grows. With most given, reading past that
+    many bytes raises Grew: a file's owner can write for as long as it is
+    read, whatever size it had when it was opened."""
     fh.seek(offset)
-    pos, buf, over = offset, b"", False
+    pos, buf, over, read = offset, b"", False, 0
     while True:
         chunk = fh.read(CHUNK)
         if not chunk:
             return
+        read += len(chunk)
+        if most is not None and read > most:
+            raise Grew()
         buf += chunk
         lines = buf.split(b"\n")
         buf = lines.pop()

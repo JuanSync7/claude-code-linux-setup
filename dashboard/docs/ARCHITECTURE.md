@@ -227,7 +227,8 @@ directory everyone can write to:
   replace, another person's event;
 - a refused batch becomes a `log-integrity` event and is removed. That
   covers a batch over the size limit, which is refused by its size without
-  being read, and one closed to the collector. A directory that is not empty
+  being read, one that grows past the limit while it is read, of which no
+  row is kept, and one closed to the collector. A directory that is not empty
   cannot be removed by the collector: it is refused and listed on every run
   until its owner or root removes it, and the batches after it are still read.
 

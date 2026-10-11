@@ -120,7 +120,53 @@ class PoisonInTheSpool(unittest.TestCase):
         with open(path, "r+b") as fh:
             fh.truncate(spool.BATCH_MAX + 1)  # sparse: no blocks are written
         self.good()
-        stats = ingest.run(self.cfg)
+        with mock.patch.object(ingest, "complete_lines", wraps=ingest.complete_lines) as read:
+            stats = ingest.run(self.cfg)
+        self.assertEqual(read.call_count, 1)  # the good batch: a size that is claimed costs nothing to refuse
+        self.assertEqual(len(stats["skipped"]), 1)
+        self.assertEqual(self.stored(), ["good"])
+        self.assertEqual(os.listdir(self.spool), [])
+
+    def test_a_batch_that_grows_past_the_limit_while_it_is_read_is_refused_whole(self):
+        # its size was within the limit when it was opened; its owner goes on
+        # writing, and a reader that followed would never reach the next batch
+        path = self.batch("a.jsonl", [head(), usage_row("early")])
+        self.good()
+        read = ingest.complete_lines
+
+        def read_while_written(fh, offset, most):
+            for n, line in enumerate(read(fh, offset, most)):
+                if n == 0 and os.path.exists(path) and os.path.samestat(os.fstat(fh.fileno()), os.stat(path)):
+                    with open(path, "ab") as more:
+                        for i in range(200):
+                            more.write(json.dumps(usage_row("late-%d" % i)).encode() + b"\n")
+                yield line
+
+        with mock.patch.object(spool, "BATCH_MAX", 4096), \
+                mock.patch.object(ingest, "complete_lines", read_while_written):
+            stats = ingest.run(self.cfg)
+        self.assertEqual(len(stats["skipped"]), 1)
+        self.assertEqual(self.stored(), ["good"])
+        self.assertEqual(rows(self.db, "select user, category from events"), [(ME, "log-integrity")])
+        self.assertEqual(os.listdir(self.spool), [])
+
+    def test_a_line_that_never_ends_stops_at_the_limit(self):
+        path = self.batch("a.jsonl", [head(), usage_row("early")])
+        with open(path, "ab") as fh:
+            fh.write(b"x" * 8192)  # no newline: its owner is still writing it
+        self.good()
+        with mock.patch.object(spool, "BATCH_MAX", 4096):
+            os.truncate(path, 4096)
+            read = ingest.complete_lines
+
+            def read_while_written(fh, offset, most):
+                if os.path.exists(path):  # gone once it has been refused
+                    with open(path, "ab") as more:
+                        more.write(b"x" * ingest.CHUNK * 2)
+                return read(fh, offset, most)
+
+            with mock.patch.object(ingest, "complete_lines", read_while_written):
+                stats = ingest.run(self.cfg)
         self.assertEqual(len(stats["skipped"]), 1)
         self.assertEqual(self.stored(), ["good"])
         self.assertEqual(os.listdir(self.spool), [])

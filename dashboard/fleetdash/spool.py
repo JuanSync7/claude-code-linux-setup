@@ -64,34 +64,23 @@ def _batch(con, cfg, path, stats):
             return _refuse(con, stats, path, owner, "larger than the %d bytes a batch may be" % BATCH_MAX, st)
         done = con.execute("select inode from checkpoints where path=?", (cp_key,)).fetchone()
         if done is None or done["inode"] != st.st_ino:
-            lines = ingest.complete_lines(fh, 0)
+            lines = ingest.complete_lines(fh, 0, BATCH_MAX)
             try:
                 head = _header(next(lines, (0, 0, None))[2])
             except ingest.BAD_RECORD as e:
                 return _refuse(con, stats, path, owner, "not a batch: %s" % type(e).__name__
                                if isinstance(e, RecursionError) else "not a batch: %s" % e, st)
+            except ingest.Grew:
+                return _refuse(con, stats, path, owner, "grew past the %d bytes a batch may be" % BATCH_MAX, st)
             user = owner if cfg["verify_file_owner"] else head["user"]
             if head["user"] != user:
                 return _refuse(con, stats, path, owner, "says it is from " + head["user"][:NAME_MAX], st)
+            try:
+                _rows(con, lines, head, user, stats)
+            except ingest.Grew:
+                return _refuse(con, stats, path, owner, "grew past the %d bytes a batch may be" % BATCH_MAX, st)
             stats["files"] += 1
             with con:
-                for _at, _end, raw in lines:
-                    if raw is not None and not raw.strip():
-                        continue
-                    stats["lines"] += 1
-                    try:
-                        if raw is None:
-                            raise ValueError("line longer than %d bytes" % ingest.LINE_MAX)
-                        sql, args = _row(json.loads(raw.decode("utf-8")), user)
-                    except ingest.BAD_RECORD:
-                        stats["bad_lines"] += 1
-                        continue
-                    con.execute(sql, args)
-                # the time is the sender's word: one ahead of this clock would
-                # outrank every later check-in the host itself makes
-                head["ts"] = min(head["ts"], store.iso(datetime.datetime.utcnow()) + "Z",
-                                 key=lambda t: t[:19])
-                ingest.record_checkin(con, head, user)
                 # remembered until the file is gone, so a batch that cannot be
                 # removed is not read again over rows a later batch replaced
                 con.execute("insert or replace into checkpoints values (?,?,0,?)", (cp_key, st.st_ino, st.st_size))
@@ -102,6 +91,36 @@ def _batch(con, cfg, path, stats):
         return
     with con:
         con.execute("delete from checkpoints where path=?", (cp_key,))
+
+
+def _rows(con, lines, head, user, stats):
+    """Store a batch's rows and its check-in, or none of them. The size was
+    checked when the file was opened and its owner can go on writing, so the
+    limit is kept again, by the reader, on what has actually been read."""
+    at = dict(stats)
+    try:
+        with con:
+            for _at, _end, raw in lines:
+                if raw is not None and not raw.strip():
+                    continue
+                stats["lines"] += 1
+                try:
+                    if raw is None:
+                        raise ValueError("line longer than %d bytes" % ingest.LINE_MAX)
+                    sql, args = _row(json.loads(raw.decode("utf-8")), user)
+                except ingest.BAD_RECORD:
+                    stats["bad_lines"] += 1
+                    continue
+                con.execute(sql, args)
+            # the time is the sender's word: one ahead of this clock would
+            # outrank every later check-in the host itself makes
+            head["ts"] = min(head["ts"], store.iso(datetime.datetime.utcnow()) + "Z",
+                             key=lambda t: t[:19])
+            ingest.record_checkin(con, head, user)
+    except ingest.Grew:
+        # the rows are rolled back, so they are not counted as read either
+        stats["lines"], stats["bad_lines"] = at["lines"], at["bad_lines"]
+        raise
 
 
 def _refuse(con, stats, path, user, why, st):
