@@ -58,7 +58,8 @@ the Overview sets usage against is zero.
 
 `actions` is the whole list of commands the Update page can start, each with a
 fixed argument list, working directory and time limit. It ships empty: with
-no entry, the page can start nothing. `docs` lists the directories or single
+no entry, the page can start nothing. `runs` is where each run's output is kept
+(`dir`, on local disk, made owner-only) and how many runs back (`keep`). `docs` lists the directories or single
 files of Markdown the Docs page shows, and `policy.source` is the policy file
 the fleet should hold, which the Policy and Hosts pages compare against.
 

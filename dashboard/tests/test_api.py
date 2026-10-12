@@ -45,6 +45,19 @@ class ConfigFailsClosed(unittest.TestCase):
             with self.assertRaises(cfgmod.ConfigError, msg=bad):
                 cfgmod.load(self.f.config(under_use=bad))
 
+    def test_a_place_to_keep_runs_that_is_not_a_full_path_is_refused_when_there_is_a_command(self):
+        action = {"id": "a", "label": "A", "about": "", "argv": ["true"], "cwd": "", "timeout_s": 5}
+        for bad in ("", "runs", "./runs"):
+            with self.assertRaises(cfgmod.ConfigError, msg=bad):
+                cfgmod.load(self.f.config(actions=[action], runs={"dir": bad, "keep": 5}))
+        # with no command nothing is ever kept there
+        cfgmod.load(self.f.config(actions=[], runs={"dir": "", "keep": 5}))
+
+    def test_keeping_no_runs_is_refused(self):
+        for bad in (0, -1):
+            with self.assertRaises(cfgmod.ConfigError, msg=bad):
+                cfgmod.load(self.f.config(runs={"dir": "/nonexistent/runs", "keep": bad}))
+
     def test_a_non_loopback_bind_is_refused_while_there_is_no_tls(self):
         with self.assertRaises(cfgmod.ConfigError):
             cfgmod.load(self.f.config(bind="0.0.0.0"))
@@ -73,9 +86,8 @@ class Overview(unittest.TestCase):
     def tearDown(self):
         self.f.close()
 
-    def test_bedrock_is_split_out_by_model_id(self):
-        prov = {p["provider"]: p["tokens"] for p in self.o["by_provider"]}
-        self.assertEqual(prov, {"anthropic": 1000010, "bedrock": 1000000})
+    def test_a_model_named_the_bedrock_way_is_bedrock(self):
+        self.assertEqual(tokens_by_provider(self.o), {"anthropic": 1000010, "bedrock": 1000000})
 
     def test_a_bedrock_id_without_a_region_prefix_is_bedrock_and_priced(self):
         # a Bedrock id with no region prefix: anthropic.<model>-<date>-v1:0
@@ -84,8 +96,7 @@ class Overview(unittest.TestCase):
                       usage(i=1000000, o=0, cr=0, cw=0))])
         ingest.run(self.cfg)
         o = api.overview(self.cfg, days=30, now=NOW)
-        prov = {p["provider"]: p["tokens"] for p in o["by_provider"]}
-        self.assertEqual(prov["bedrock"], 2000000)
+        self.assertEqual(tokens_by_provider(o)["bedrock"], 2000000)
         self.assertAlmostEqual(o["cost"]["priced_usd"], 70.0)
 
     def test_cost_uses_the_price_table_and_an_unpriced_model_is_unknown_not_zero(self):
@@ -103,6 +114,72 @@ class Overview(unittest.TestCase):
 
     def test_blocks_are_counted_by_source(self):
         self.assertEqual(self.o["blocks"], [{"source": "Blocked by classifier", "count": 1}])
+
+
+def tokens_by_provider(o):
+    return {p["provider"]: p["tokens"] for p in o["providers"]}
+
+
+class Providers(unittest.TestCase):
+    """Bedrock answers with the plain model name, so the name alone cannot say
+    a call went there. The message id can: Bedrock's start msg_bdrk_."""
+
+    def setUp(self):
+        self.f = Fleet()
+        self.cfg = cfgmod.load(self.f.config())
+        self.f.transcript("alice", "p1", "s1", [
+            assistant("a1", "msg_01abc", "2026-10-09T10:00:00Z", "claude-opus-5-5",
+                      usage(i=1000000, o=0, cr=0, cw=0)),
+            assistant("a2", "msg_bdrk_01abc", "2026-10-09T11:00:00Z", "claude-opus-5-5",
+                      usage(i=0, o=1000000, cr=2000000, cw=0)),
+            assistant("a3", "msg_bdrk_01abd", "2026-10-09T12:00:00Z", "claude-haiku-5-5",
+                      usage(i=5, o=5, cr=0, cw=0)),
+            assistant("a4", "0c1f-not-an-api-id", "2026-10-09T12:30:00Z", "<synthetic>",
+                      usage(i=0, o=0, cr=0, cw=0)),
+        ])
+        ingest.run(self.cfg)
+        self.o = api.overview(self.cfg, days=30, now=NOW)
+        self.p = {p["provider"]: p for p in self.o["providers"]}
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_a_bedrock_call_is_known_by_its_message_id_whatever_the_model_is_called(self):
+        self.assertEqual(tokens_by_provider(self.o), {"anthropic": 1000000, "bedrock": 3000010})
+
+    def test_the_same_model_through_both_is_a_row_in_each_with_its_own_counts(self):
+        row = {k: [m for m in p["models"] if m["model"] == "claude-opus-5-5"] for k, p in self.p.items()}
+        self.assertEqual([(m["input"], m["output"], m["cache_read"], m["cache_write"]) for m in row["anthropic"]],
+                         [(1000000, 0, 0, 0)])
+        self.assertEqual([(m["input"], m["output"], m["cache_read"], m["cache_write"]) for m in row["bedrock"]],
+                         [(0, 1000000, 2000000, 0)])
+        self.assertAlmostEqual(row["anthropic"][0]["usd"], 10.0)
+        self.assertAlmostEqual(row["bedrock"][0]["usd"], 52.0)
+
+    def test_each_provider_has_its_own_cost_and_an_unpriced_model_leaves_only_that_one_unknown(self):
+        self.assertAlmostEqual(self.p["anthropic"]["usd"], 10.0)
+        self.assertIsNone(self.p["bedrock"]["usd"])
+        self.assertAlmostEqual(self.p["bedrock"]["priced_usd"], 52.0)
+        self.assertEqual(self.p["bedrock"]["unpriced_models"], ["claude-haiku-5-5"])
+        self.assertEqual(self.p["anthropic"]["unpriced_models"], [])
+
+    def test_a_provider_nobody_used_is_still_there_with_nothing_in_it(self):
+        cfg = cfgmod.load(self.f.config(bedrock_id_prefix="", bedrock_model_pattern="^never$"))
+        p = {x["provider"]: x for x in api.overview(cfg, days=30, now=NOW)["providers"]}
+        self.assertEqual((p["bedrock"]["tokens"], p["bedrock"]["models"], p["bedrock"]["usd"]), (0, [], 0.0))
+        self.assertEqual(p["anthropic"]["tokens"], 4000010)
+
+    def test_a_message_claude_code_wrote_itself_is_not_a_model(self):
+        self.assertNotIn("<synthetic>", [m["model"] for p in self.o["providers"] for m in p["models"]])
+        self.assertNotIn("<synthetic>", self.o["cost"]["unpriced_models"])
+
+    def test_the_two_marks_of_bedrock_do_not_count_one_call_twice(self):
+        self.f.transcript("bob", "p1", "s2", [
+            assistant("b1", "msg_bdrk_02", "2026-10-09T10:00:00Z", "eu.anthropic.claude-opus-5-5",
+                      usage(i=7, o=0, cr=0, cw=0))])
+        ingest.run(self.cfg)
+        o = api.overview(self.cfg, days=30, now=NOW)
+        self.assertEqual(tokens_by_provider(o), {"anthropic": 1000000, "bedrock": 3000017})
 
 
 class EventsAndSessions(unittest.TestCase):
@@ -138,6 +215,23 @@ class EventsAndSessions(unittest.TestCase):
         got = api.events(self.cfg)
         self.assertEqual(got["facets"]["users"], ["alice", "bob"])
         self.assertIn("deny", got["facets"]["severities"])
+
+    def test_events_filter_by_who_decided_and_by_tool(self):
+        self.f.hooklog("denied", "alice", [
+            {"ts": "2026-10-09T10:00:02Z", "user": "alice", "tool": "Write", "detail": "/etc/x", "denied_by": "hook"}])
+        ingest.run(self.cfg)
+        by_source = api.events(self.cfg, source="hook")
+        self.assertEqual([(e["user"], e["tool"]) for e in by_source["rows"]], [("alice", "Write")])
+        self.assertEqual(by_source["total"], 1)
+        by_tool = api.events(self.cfg, tool="Bash", severity="deny")
+        self.assertEqual([e["detail"] for e in by_tool["rows"]], ["sudo x"])
+        self.assertEqual(api.events(self.cfg, tool="Write", source="rule")["total"], 0)
+
+    def test_the_facets_list_only_the_deciders_and_tools_that_are_stored(self):
+        f = api.events(self.cfg)["facets"]
+        self.assertEqual(f["tools"], ["Bash"])
+        self.assertEqual(f["sources"], sorted({e["source"] for e in api.events(self.cfg)["rows"]} - {""}))
+        self.assertIn("rule", f["sources"])
 
     def test_sessions_report_age_and_filter_by_user(self):
         got = api.sessions(self.cfg, now=NOW)

@@ -142,15 +142,34 @@ td .flag { margin-left: 8px; margin-right: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
 .chips code, .doc :not(pre) > code { background: var(--paper); border-radius: 4px; padding: 1px 6px; }
 
-/* update: one configured command per row */
-.action { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 4px 32px; align-items: start; }
-.action .what p { margin: 0 0 6px; max-width: 68ch; }
-.action .cmd { color: var(--graphite); word-break: break-all; }
-.action .go { text-align: right; }
-.action .go p { margin: 6px 0 0; font-size: 12px; }
-.action .last, .action .out, .action > .muted { grid-column: 1 / -1; margin: 0; }
-.out { background: var(--paper); border: 1px solid var(--rule); border-radius: 7px; padding: 12px 14px; margin-top: 8px !important;
-       max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+/* a provider's table on the overview */
+.provider h2 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.provider h2 small { font-weight: 400; color: var(--graphite); font-size: 12px; margin-left: 6px; }
+.provider h2 .key { margin: 0; }
+.provider > .muted { margin: 0 0 12px; max-width: 76ch; }
+tfoot td { font-weight: 600; border-bottom: 0; border-top: 1px solid var(--rule); }
+
+/* update: the commands beside what the chosen run printed */
+.bench { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 0 40px;
+         border-top: 1px solid var(--rule); padding-top: 24px; align-items: start; }
+.command { padding: 14px 0; border-top: 1px solid #EEF1F3; }
+.commands h2 + .command { border-top: 0; padding-top: 0; }
+.command h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.command p { margin: 0 0 6px; }
+.cmd { color: var(--graphite); word-break: break-all; }
+.command .go { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+.command .go a { text-decoration: none; }
+.command .go a:hover .muted { text-decoration: underline; }
+.console { min-width: 0; position: sticky; top: 20px; }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0 0 12px; }
+.facts dt { color: var(--graphite); font-size: 12px; padding-top: 2px; }
+.facts dd { margin: 0; }
+.out { background: var(--paper); border: 1px solid var(--rule); border-radius: 7px; padding: 12px 14px; margin: 0 0 8px;
+       min-height: 280px; height: 56vh; overflow: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.console > .muted { margin: 0; font-size: 12px; word-break: break-all; }
+tr.on td { background: var(--paper); }
+td .cmd { font-size: 12px; max-width: 520px; }
+td a { color: var(--blue); text-underline-offset: 2px; white-space: nowrap; }
 
 /* docs: the list of documents beside the one being read */
 .docs { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; border-top: 1px solid var(--rule); padding-top: 20px; }
@@ -187,7 +206,8 @@ td .flag { margin-left: 8px; margin-right: 0; }
   .cols, .cols.three { grid-template-columns: minmax(0, 1fr); }
   .docs { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .doclist { position: static; max-height: 180px; }
-  .action { grid-template-columns: minmax(0, 1fr); } .action .go { text-align: left; }
+  .bench { grid-template-columns: minmax(0, 1fr); gap: 24px 0; }
+  .console { position: static; } .out { height: 44vh; }
   .ages { grid-template-columns: 1fr 1fr; }
   .bars { grid-template-columns: minmax(64px, 34%) minmax(40px, 1fr) max-content; }
   .bars .k { max-width: none; }

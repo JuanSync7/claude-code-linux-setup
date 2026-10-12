@@ -80,8 +80,9 @@ def main(out):
                 for k in range(int(20 * weight * random.random()) + 3):
                     n += 1
                     ts = (day + datetime.timedelta(minutes=k)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    model = random.choice(["claude-opus-5-5"] * 5 + ["claude-sonnet-5-5"] * 3 + ["claude-haiku-5-5"]
-                                          + (["eu.anthropic.claude-opus-5-5"] * 3 if person in ("chen", "dana") else []))
+                    model = random.choice(["claude-opus-5-5"] * 5 + ["claude-sonnet-5-5"] * 3 + ["claude-haiku-5-5"])
+                    # two people reach the same models through Bedrock some of the time: only the message id says so
+                    bedrock = person in ("chen", "dana") and random.random() < 0.3
                     extra = {}
                     if random.random() < 0.004 * weight:
                         # a rejection names the window it falls in by when that window resets,
@@ -95,7 +96,7 @@ def main(out):
                         extra.update(isApiErrorMessage=True, apiErrorStatus=random.choice([429, 500, 529]))
                     if random.random() < 0.03:
                         extra["attributionSkill"] = random.choice(["code-review", "debugging", "brainstorming"])
-                    recs.append(assistant("%08d" % n, "msg%d" % n, ts, model, usage(
+                    recs.append(assistant("%08d" % n, ("msg_bdrk_%d" if bedrock else "msg%d") % n, ts, model, usage(
                         i=random.randint(5, 900), o=random.randint(100, 4000),
                         cr=random.randint(20000, 160000), cw=random.randint(0, 9000)), **extra))
                     if random.random() < 0.02:

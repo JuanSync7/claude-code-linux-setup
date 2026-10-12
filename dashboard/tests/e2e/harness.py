@@ -14,6 +14,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -66,7 +67,7 @@ def populated_fleet():
                   quotaLimits={"status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1}),
         assistant("a3", "ma3", at(2, "11:00"), "claude-opus-5-5", usage(), attributionSkill="review")])
     f.transcript("bob", "proj-b", "s2", [
-        assistant("b1", "mb1", at(2, "10:00"), "eu.anthropic.claude-opus-5-5", usage(i=1000))])
+        assistant("b1", "msg_bdrk_b1", at(2, "10:00"), "claude-opus-5-5", usage(i=1000))])
     f.hooklog("activity", "alice", [
         {"ts": at(2, "10:00"), "tool": "Bash", "detail": "make test"},
         {"ts": at(2, "10:01"), "event": "redaction", "tool": "Read", "kinds": ["private-key"], "count": 1}])
@@ -160,6 +161,22 @@ class Server(object):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read().decode())
 
+    def run(self, action):
+        """Starts a configured action and follows it to its end, as the page
+        does: the run as last reported, with everything it printed."""
+        key = self.json("/api/actions")["run_key"]
+        status, out = self.post("/api/run", {"id": action}, {"X-Fleetdash-Run": key})
+        if status != 200:
+            raise AssertionError("starting %s answered %d: %r" % (action, status, out))
+        text, offset, deadline = "", 0, time.time() + START_TIMEOUT
+        while time.time() < deadline:
+            chunk = self.json("/api/run?id=%d&offset=%d" % (out["run"], offset))
+            text, offset = text + chunk["output"], chunk["next"]
+            # ended, and the server is free to start the next one
+            if not chunk["more"] and not self.json("/api/actions")["busy"]:
+                return dict(chunk["run"], output=text)
+        raise AssertionError("run %d of %s did not end" % (out["run"], action))
+
     def json(self, path):
         status, _, body = self.get(path)
         if status != 200:
@@ -207,6 +224,9 @@ def render(url, budget_ms=5000):
     args = [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--disable-extensions",
             # without it Chrome waits ~25 s on a desktop keyring over D-Bus
             "--password-store=basic",
+            # a new profile otherwise fetches component updates and field trials: a run talks to loopback only
+            "--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-pings",
+            "--disable-default-apps", "--disable-domain-reliability",
             "--user-data-dir=" + profile, "--virtual-time-budget=%d" % budget_ms, "--dump-dom", url]
     if os.geteuid() == 0:
         args.insert(1, "--no-sandbox")  # Chrome refuses to sandbox as root (the CI container)

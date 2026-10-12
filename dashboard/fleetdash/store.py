@@ -71,10 +71,14 @@ create table if not exists hosts (
 
 create table if not exists runs (
     id        integer primary key autoincrement,
-    ts        text not null,
+    ts        text not null,     -- when it was started
     action    text not null,
-    exit_code integer,              -- NULL: stopped at its time limit
-    seconds   real not null
+    argv      text not null,     -- JSON list: the command as it was started, whatever the config says now
+    cwd       text not null,
+    state     text not null,     -- vocab.RUN_STATES
+    exit_code integer,           -- NULL unless state is done
+    seconds   real,              -- NULL while it runs
+    bytes     integer            -- how much it printed; NULL while it runs
 );
 
 create table if not exists meta (k text primary key, v text not null);
@@ -88,7 +92,8 @@ ISO = "%Y-%m-%dT%H:%M:%S"
 #   4: ...in ASCII digits only; a 3 store may hold other scripts' digits
 #   5: an event names its host and a hook-log key includes it; sessions keyed
 #      by (user, path); host check-ins and action runs have tables
-SCHEMA_VERSION = 5
+#   6: a run has a row from its start, with its command line and its state
+SCHEMA_VERSION = 6
 
 
 def connect(cfg):

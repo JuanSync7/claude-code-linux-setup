@@ -72,11 +72,13 @@ class Fleet(object):
             "host_stale_hours": 72,
             "docs": [],
             "actions": [],
+            "runs": {"dir": os.path.join(self.root, "runs"), "keep": 20},
             "install": {"account": "", "python": "/usr/bin/python3",
                         "code_dir": "/usr/local/share/fleetdash", "config_file": "/etc/fleetdash/config.json",
                         "units_dir": "/etc/systemd/system", "ingest_interval": "5min", "prune_calendar": "daily"},
             # the test runner owns every fixture file, whatever its name
             "verify_file_owner": False,
+            "bedrock_id_prefix": "msg_bdrk_",
             "bedrock_model_pattern": r"^(?:(?:[a-z]{2,4}\.)?anthropic\.|arn:aws:bedrock:)",
             "prices_per_mtok": {
                 "claude-opus": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 20.0}

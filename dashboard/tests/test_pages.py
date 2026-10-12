@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -249,6 +250,7 @@ class RunningActions(unittest.TestCase):
     def setUp(self):
         self.f = Fleet()
         self.marker = os.path.join(self.f.root, "ran")
+        self.go = os.path.join(self.f.root, "go")
         py = sys.executable
         self.cfg = cfgmod.load(self.f.config(actions=[
             {"id": "ok", "label": "Say ok", "about": "prints", "cwd": "", "timeout_s": 20,
@@ -258,17 +260,33 @@ class RunningActions(unittest.TestCase):
             {"id": "slow", "label": "Slow", "about": "", "cwd": "", "timeout_s": 1,
              "argv": [py, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); time.sleep(30)"]},
             {"id": "loud", "label": "Loud", "about": "", "cwd": "", "timeout_s": 20,
-             "argv": [py, "-c", "print('y' * 600000)"]},
-            {"id": "gone", "label": "Gone", "about": "", "cwd": "", "timeout_s": 5, "argv": ["/no/such/binary"]}]))
+             "argv": [py, "-c", "print('y' * %d)" % (actions.OUTPUT_MAX + 600000)]},
+            {"id": "gone", "label": "Gone", "about": "", "cwd": "", "timeout_s": 5, "argv": ["/no/such/binary"]},
+            {"id": "talk", "label": "Talk", "about": "", "cwd": "", "timeout_s": 20,
+             "argv": [py, "-u", "-c", "import os,sys,time\nprint('first')\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.05)\nprint('second')", self.go]},
+            {"id": "wide", "label": "Wide", "about": "", "cwd": "", "timeout_s": 20,
+             "argv": [py, "-c", "import sys; sys.stdout.buffer.write(b'x' + b'\\xc3\\xa9' * %d + b'\\n')" % actions.CHUNK_MAX]},
+            {"id": "binary", "label": "Binary", "about": "", "cwd": "", "timeout_s": 20,
+             "argv": [py, "-c", "import sys; sys.stdout.buffer.write(b'a\\xffb\\xc3')"]}],
+            runs={"dir": os.path.join(self.f.root, "runs"), "keep": 3}))
         self.httpd = server.make_server(self.cfg, token="t0ken")
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.key = json.loads(self.call("GET", "/api/actions")[1].decode())["run_key"]
 
     def tearDown(self):
+        open(self.go, "w").close()
+        self.runner_idle()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.f.close()
+
+    def runner_idle(self):
+        """A run's row is done a moment before its thread has tidied up and let go."""
+        deadline = time.time() + 40
+        while json.loads(self.call("GET", "/api/actions")[1].decode())["busy"]:
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.02)
 
     def call(self, method, path, body=None, **headers):
         hdrs = {"X-Fleetdash-Token": "t0ken"}
@@ -282,42 +300,151 @@ class RunningActions(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
-    def run_action(self, action, **headers):
+    def start(self, action, **headers):
         headers.setdefault("X_Fleetdash_Run", self.key)
         status, body = self.call("POST", "/api/run", {"id": action}, **headers)
         return status, json.loads(body.decode())
 
+    def read(self, run, offset=0):
+        status, body = self.call("GET", "/api/run?id=%d&offset=%d" % (run, offset))
+        return status, json.loads(body.decode())
+
+    def run_action(self, action, **headers):
+        """Starts it, follows it to its end the way the page does, and returns
+        the run as last reported with everything it printed."""
+        status, out = self.start(action, **headers)
+        if status != 200:
+            return status, out
+        text, offset, deadline = "", 0, time.time() + 40
+        while time.time() < deadline:
+            chunk = self.read(out["run"], offset)[1]
+            text, offset = text + chunk["output"], chunk["next"]
+            if not chunk["more"]:
+                return status, dict(chunk["run"], output=text, cut=chunk["cut"], file=chunk["file"])
+        self.fail("run %d did not end" % out["run"])
+
     def test_a_listed_action_runs_and_its_exit_code_and_output_come_back(self):
         status, out = self.run_action("ok")
-        self.assertEqual((status, out["exit_code"], out["timed_out"]), (200, 3, False))
+        self.assertEqual((status, out["exit_code"], out["state"]), (200, 3, "done"))
         self.assertTrue(out["output"].startswith("hello\n"))
 
     def test_it_runs_in_the_configured_directory(self):
         self.assertEqual(self.run_action("touch")[1]["exit_code"], 0)
         self.assertTrue(os.path.exists(self.marker))
 
-    def test_each_run_is_recorded_and_the_listing_shows_the_last(self):
+    def test_starting_answers_at_once_and_the_output_can_be_read_while_it_runs(self):
+        t0 = time.time()
+        status, out = self.start("talk")
+        self.assertEqual(status, 200)
+        self.assertLess(time.time() - t0, 2)
+        seen, offset, deadline = "", 0, time.time() + 10
+        while "first" not in seen and time.time() < deadline:
+            chunk = self.read(out["run"], offset)[1]
+            seen, offset = seen + chunk["output"], chunk["next"]
+        self.assertIn("first", seen)
+        self.assertNotIn("second", seen)
+        self.assertEqual((chunk["run"]["state"], chunk["run"]["exit_code"], chunk["more"]), ("running", None, True))
+        open(self.go, "w").close()
+        while chunk["more"] and time.time() < deadline:
+            chunk = self.read(out["run"], offset)[1]
+            seen, offset = seen + chunk["output"], chunk["next"]
+        self.assertEqual((seen, chunk["run"]["state"], chunk["run"]["exit_code"]), ("first\nsecond\n", "done", 0))
+
+    def test_a_run_keeps_the_command_it_was_started_with_and_all_it_printed(self):
+        out = self.run_action("ok")[1]
+        self.assertEqual((out["action"], out["command"], out["cwd"]), ("ok", self.cfg["actions"][0]["argv"], ""))
+        self.assertEqual(out["bytes"], len(out["output"]))
+        with open(out["file"]) as fh:
+            self.assertEqual(fh.read(), out["output"])
+        self.assertEqual(os.stat(out["file"]).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(self.cfg["runs"]["dir"]).st_mode & 0o777, 0o700)
+        # a second server on the same store, as after a restart, still has it
+        again = actions.Runner(self.cfg).read(out["run"], 0)
+        self.assertEqual((again["output"], again["run"]["exit_code"]), (out["output"], 3))
+
+    def test_each_run_is_recorded_and_the_listing_shows_the_last_and_the_history(self):
         self.run_action("ok")
         self.run_action("ok")
+        self.run_action("touch")
         con = sqlite3.connect(self.cfg["store"])
-        self.assertEqual(con.execute("select action, exit_code from runs").fetchall(), [("ok", 3), ("ok", 3)])
+        self.assertEqual(con.execute("select action, state, exit_code from runs order by id").fetchall(),
+                         [("ok", "done", 3), ("ok", "done", 3), ("touch", "done", 0)])
         con.close()
-        listed = {a["id"]: a for a in json.loads(self.call("GET", "/api/actions")[1].decode())["actions"]}
-        self.assertEqual((listed["ok"]["last"]["exit_code"], listed["touch"]["last"]), (3, None))
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        listed = {a["id"]: a for a in listing["actions"]}
+        self.assertEqual((listed["ok"]["last"]["exit_code"], listed["ok"]["last"]["run"], listed["slow"]["last"]),
+                         (3, 2, None))
+        self.assertEqual([(r["run"], r["action"]) for r in listing["runs"]], [(3, "touch"), (2, "ok"), (1, "ok")])
+
+    def test_only_the_newest_runs_are_kept_and_an_older_ones_output_goes_with_it(self):
+        files = [self.run_action("ok")[1]["file"] for _ in range(4)]
+        self.runner_idle()
+        self.assertEqual([os.path.exists(f) for f in files], [False, True, True, True])
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        self.assertEqual([r["run"] for r in listing["runs"]], [4, 3, 2])
+        self.assertEqual(self.read(1)[0], 404)
 
     def test_an_action_past_its_time_limit_is_stopped_with_its_children_and_has_no_exit_code(self):
         status, out = self.run_action("slow")
-        self.assertEqual((status, out["exit_code"], out["timed_out"]), (200, None, True))
+        self.assertEqual((status, out["exit_code"], out["state"]), (200, None, "timed-out"))
         self.assertLess(out["seconds"], 10)
 
-    def test_long_output_is_cut_and_says_so(self):
+    def test_long_output_is_shown_up_to_a_limit_and_the_file_has_the_rest(self):
         out = self.run_action("loud")[1]
-        self.assertEqual((len(out["output"]), out["truncated"]), (actions.OUTPUT_MAX, True))
+        self.assertEqual((len(out["output"]), out["cut"]), (actions.OUTPUT_MAX, True))
+        self.assertEqual(os.path.getsize(out["file"]), actions.OUTPUT_MAX + 600001)
+        self.assertEqual(out["bytes"], actions.OUTPUT_MAX + 600001)
+        # from any offset, not only one a chunk ends on
+        status, tail = self.read(out["run"], actions.OUTPUT_MAX - 10)
+        self.assertEqual((status, len(tail["output"]), tail["next"], tail["more"], tail["cut"]),
+                         (200, 10, actions.OUTPUT_MAX, False, True))
+
+    def test_a_character_cut_by_a_chunk_is_whole_in_the_next_one(self):
+        out = self.run_action("wide")[1]
+        self.assertEqual(out["output"], "x" + "\u00e9" * actions.CHUNK_MAX + "\n")
+        first = self.read(out["run"], 0)[1]
+        self.assertEqual((first["next"], first["output"][-1]), (actions.CHUNK_MAX - 1, "\u00e9"))
+
+    def test_output_that_is_not_text_is_shown_marked_not_refused(self):
+        out = self.run_action("binary")[1]
+        self.assertEqual(out["output"], "a\ufffdb\ufffd")
 
     def test_a_command_that_cannot_start_is_reported_not_a_crash(self):
         status, out = self.run_action("gone")
-        self.assertEqual((status, out["exit_code"]), (200, None))
+        self.assertEqual((status, out["exit_code"], out["state"]), (200, None, "not-started"))
         self.assertIn("could not start", out["output"])
+
+    def test_a_run_another_server_left_unfinished_is_shown_as_interrupted_not_running(self):
+        con = sqlite3.connect(self.cfg["store"])
+        with con:
+            con.execute("insert into runs (ts, action, argv, cwd, state) values "
+                        "('2026-10-09T10:00:00Z', 'ok', '[\"x\"]', '', 'running')")
+        con.close()
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        self.assertEqual((listing["running"], listing["runs"][0]["state"]), (None, "interrupted"))
+        status, got = self.read(listing["runs"][0]["run"])
+        self.assertEqual((status, got["run"]["state"], got["more"], got["output"]), (200, "interrupted", False, ""))
+
+    def test_a_run_that_is_not_there_or_a_place_past_its_end_is_refused(self):
+        run = self.run_action("ok")[1]["run"]
+        self.assertEqual(self.read(run + 1)[0], 404)
+        self.assertEqual(self.read(run, 10 ** 6)[0], 400)
+        for q in ("", "?id=x", "?id=%d&offset=-1" % run, "?id=0"):
+            self.assertEqual(self.call("GET", "/api/run" + q)[0], 400, q)
+        self.assertEqual(self.call("GET", "/api/run?id=%d" % run, X_Fleetdash_Token=None)[0], 403)
+
+    def test_when_a_runs_output_cannot_be_kept_nothing_is_started_or_recorded(self):
+        taken = os.path.join(self.cfg["runs"]["dir"], "1.log")
+        os.makedirs(self.cfg["runs"]["dir"])
+        open(taken, "w").close()
+        status, out = self.start("touch")
+        self.assertEqual(status, 500)
+        self.assertIn("cannot keep", out["error"])
+        self.assertFalse(os.path.exists(self.marker))
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        self.assertEqual((listing["runs"], listing["busy"]), ([], False))
+        os.unlink(taken)
+        self.assertEqual(self.run_action("touch")[1]["exit_code"], 0)
 
     def test_an_id_the_config_does_not_list_runs_nothing(self):
         self.assertEqual(self.run_action("rm -rf /")[0], 404)
@@ -344,7 +471,7 @@ class RunningActions(unittest.TestCase):
         for origin in ("http://evil.example", "http://127.0.0.1:1", "https://127.0.0.1:%d" % self.port, "null"):
             self.assertEqual(self.run_action("touch", Origin=origin)[0], 403, origin)
         self.assertFalse(os.path.exists(self.marker))
-        self.assertEqual(self.run_action("touch", Origin="http://127.0.0.1:%d" % self.port)[0], 200)
+        self.assertEqual(self.run_action("touch", Origin="http://127.0.0.1:%d" % self.port)[1]["exit_code"], 0)
 
     def test_a_foreign_host_header_runs_nothing(self):
         self.assertEqual(self.run_action("touch", Host="evil.example")[0], 403)
@@ -355,19 +482,16 @@ class RunningActions(unittest.TestCase):
             self.assertEqual(self.call("POST", "/api/run", body, X_Fleetdash_Run=self.key)[0], 400, body[:20])
 
     def test_only_one_action_runs_at_a_time(self):
-        import time
-        got = []
-        t = threading.Thread(target=lambda: got.append(self.run_action("slow")))
-        t.start()
-        deadline, running = time.time() + 5, None
-        while time.time() < deadline and running != "slow":
-            running = json.loads(self.call("GET", "/api/actions")[1].decode())["running"]
-        self.assertEqual(running, "slow")
-        self.assertEqual(self.run_action("touch")[0], 409)
-        t.join()
+        status, out = self.start("talk")
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        self.assertEqual((status, listing["running"], listing["run"], listing["busy"]), (200, "talk", out["run"], True))
+        self.assertEqual(self.start("touch")[0], 409)
         self.assertFalse(os.path.exists(self.marker))
-        self.assertIsNone(json.loads(self.call("GET", "/api/actions")[1].decode())["running"])
-        self.assertEqual(self.run_action("touch")[0], 200)
+        open(self.go, "w").close()
+        self.runner_idle()
+        listing = json.loads(self.call("GET", "/api/actions")[1].decode())
+        self.assertEqual((listing["running"], listing["run"]), (None, None))
+        self.assertEqual(self.run_action("touch")[1]["exit_code"], 0)
 
     def test_every_other_post_is_still_refused(self):
         self.assertEqual(self.call("POST", "/api/overview", {"id": "ok"}, X_Fleetdash_Run=self.key)[0], 405)

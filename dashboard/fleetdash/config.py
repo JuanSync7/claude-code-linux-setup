@@ -1,6 +1,7 @@
 """Loads the site config. Every key is required and no unknown key is allowed,
 so a typo fails at start-up instead of silently using a default."""
 import json
+import os
 import re
 
 from fleetdash.vocab import SEVERITIES
@@ -26,9 +27,11 @@ KEYS = {
     "host_stale_hours": int,       # a host not heard from for this long is shown as stale
     "docs": list,                  # [{label, path}]: directories of documents the Docs page shows
     "actions": list,               # [{id, label, about, argv, cwd, timeout_s}]: the only commands the Update page can run
+    "runs": dict,                  # {dir, keep}: where each run's output is kept, and how many runs back
     "install": dict,               # {account, python, code_dir, config_file, units_dir, ingest_interval, prune_calendar}
     "verify_file_owner": bool,     # refuse a hook log or transcript not owned by the user it is for
-    "bedrock_model_pattern": str,  # regex on the model id that marks a Bedrock call
+    "bedrock_id_prefix": str,      # what a Bedrock message id starts with; "" to go by the model name alone
+    "bedrock_model_pattern": str,  # regex on the model name that also marks a Bedrock call
     "prices_per_mtok": dict,       # model-family prefix -> USD per million tokens
     "seats": list,                 # [{tier, monthly_usd, users: [...]}]
     "retention": dict,             # severity -> {days, max_rows}
@@ -39,6 +42,7 @@ PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 SHAPES = {
     "feed": {"transcripts": str, "state_dir": str},
     "policy": {"deployed": str, "source": str},
+    "runs": {"dir": str, "keep": int},
     "install": {"account": str, "python": str, "code_dir": str, "config_file": str, "units_dir": str,
                 "ingest_interval": str, "prune_calendar": str},
 }
@@ -103,6 +107,10 @@ def load(path):
             raise ConfigError("actions[%s].argv must be a list of non-empty strings" % a["id"])
         if a["timeout_s"] < 1:
             raise ConfigError("actions[%s].timeout_s must be at least 1" % a["id"])
+    if cfg["actions"] and not os.path.isabs(cfg["runs"]["dir"]):
+        raise ConfigError("runs.dir must be an absolute path when actions are listed: a run's output is kept there")
+    if cfg["runs"]["keep"] < 1:
+        raise ConfigError("runs.keep must be at least 1")
     if cfg["host_stale_hours"] < 1:
         raise ConfigError("host_stale_hours must be at least 1")
     u = cfg["under_use"]

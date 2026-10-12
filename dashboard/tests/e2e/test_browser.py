@@ -93,14 +93,54 @@ class EveryPageRenders(unittest.TestCase):
         # a document in another group of the list, reached by its place on disk
         self.assertIn('<a href="#/docs/1%3AGOAL.md">the goal</a>', other.dom)
 
-    def test_update_lists_the_configured_command_and_shows_a_runs_output(self):
+    def test_overview_has_one_table_for_the_subscription_and_one_for_bedrock(self):
+        p = render(self.srv.url)
+        tables = {}
+        for cls in ("anthropic", "bedrock"):
+            start = p.dom.index('<section class="provider %s">' % cls)
+            tables[cls] = p.dom[start:p.dom.index("</section>", start)]
+        # the same model name in both, each with its own tokens: bob's 1k-input call is the Bedrock one
+        self.assertIn("Claude subscription, through Anthropic", tables["anthropic"])
+        self.assertIn("Amazon Bedrock", tables["bedrock"])
+        for cls in tables:
+            self.assertIn("<td>claude-opus-5-5</td>", tables[cls])
+            self.assertIn("<tfoot>", tables[cls])
+        self.assertIn('title="1,000"', tables["bedrock"])
+        self.assertNotIn('title="1,000"', tables["anthropic"])
+        self.assertIn('title="900,020"', tables["anthropic"])
+
+    def test_update_shows_the_command_line_each_command_will_run(self):
         p = render(self.srv.url + "#/update")
         self.assertIn("Prints one line and changes nothing.", p.main_text)
-        key = self.srv.json("/api/actions")["run_key"]
-        self.assertEqual(self.srv.post("/api/run", {"id": "say-hello"}, {"X-Fleetdash-Run": key})[0], 200)
-        p = render(self.srv.url + "#/update")
-        self.assertIn("hello from the action", p.main_text)
-        self.assertIn('<span class="sev pass">exit code 0</span>', p.dom)
+        self.assertIn('<p class="cmd">', p.dom)
+        self.assertIn("hello from the action", p.dom[p.dom.index('<p class="cmd">'):])  # it is in the command line itself
+
+    def test_update_shows_what_a_run_was_started_with_and_all_it_printed(self):
+        run = self.srv.run("say-hello")
+        self.assertEqual((run["state"], run["output"]), ("done", "hello from the action\n"))
+        for url in (self.srv.url + "#/update", self.srv.url + "#/update/%d" % run["run"]):
+            with self.subTest(url=url):
+                p = render(url)
+                self.assertEqual(p.main.get("data-state"), "ready", p.main_text[:300])
+                self.assertIn('aria-label="Output of run %d">hello from the action\n</pre>' % run["run"], p.dom)
+                facts = p.dom[p.dom.index('<dl class="facts">'):]
+                facts = facts[:facts.index("</dl>")]
+                self.assertIn('<span class="sev pass">exit code 0</span>', facts)
+                self.assertIn("hello from the action", facts)  # the command line it was started with
+                self.assertIn("<dt>Command</dt>", p.dom)
+                self.assertIn('<a href="#/update/%d" aria-current="true">Run %d</a>' % (run["run"], run["run"]), p.dom)
+                self.assertIn("All of it, also kept in ", p.main_text)
+
+    def test_update_opens_an_earlier_run_by_its_number_and_the_newest_otherwise(self):
+        first = self.srv.run("say-hello")
+        second = self.srv.run("say-hello")
+        self.assertIn("<h2>Run %d, Say hello</h2>" % second["run"], render(self.srv.url + "#/update").dom)
+        self.assertIn("<h2>Run %d, Say hello</h2>" % first["run"],
+                      render(self.srv.url + "#/update/%d" % first["run"]).dom)
+        # a number that is not a kept run falls back to the newest, it does not break the page
+        gone = render(self.srv.url + "#/update/999999")
+        self.assertEqual(gone.main.get("data-state"), "ready")
+        self.assertIn("<h2>Run %d, Say hello</h2>" % second["run"], gone.dom)
 
     def test_a_logged_command_is_shown_as_text_not_markup(self):
         p = render(self.srv.url + "#/logs")

@@ -81,8 +81,8 @@ async function save(path, name) {
 }
 
 const main = document.getElementById("main");
-const state = { days: 30, logs: { user: "", severity: "", category: "", rows: [], total: 0 }, sessUser: "",
-                update: { started: null, error: null } };
+const state = { days: 30, logs: { user: "", severity: "", category: "", source: "", tool: "", rows: [], total: 0 }, sessUser: "",
+                update: { gen: 0, error: null } };
 
 // A page's content: nested lists are flattened and an absent part is left out,
 // as h() does for an element's children.
@@ -129,30 +129,36 @@ async function overview() {
   const o = await get("/api/overview?days=" + state.days);
   const c = o.severity_counts;
   const tokens = o.by_user.reduce((a, u) => a + u.tokens, 0);
-  const api = o.cost.priced_usd, seats = o.seats.window_usd;
+  const seats = o.seats.window_usd;
+
+  // seats pay for the subscription's tokens only: Bedrock is billed by AWS for each one
+  const [sub, bedrock] = ["anthropic", "bedrock"].map(k => o.providers.find(p => p.provider === k));
+  const api = sub.priced_usd, unpriced = sub.unpriced_models;
+  const aside = bedrock.tokens ? h("p", { class: "muted", text: "Bedrock is not in this comparison: AWS bills it per token, about " +
+    fmt.usd(bedrock.priced_usd) + " at the configured prices" + (bedrock.unpriced_models.length ? ", and more for the unpriced models." : ".") }) : null;
 
   let hero;
-  if (!api && o.cost.unpriced_models.length) {
-    hero = h("div", { class: "hero" }, h("p", { class: "line" }, "Cost unknown", h("span", { text: ", " + fmt.tok(tokens) + " tokens" })),
-             h("p", { class: "muted", text: "No price is configured for " + o.cost.unpriced_models.join(", ") +
-               ". Add them to prices_per_mtok in the config to compare against seats." }));
+  if (!api && unpriced.length) {
+    hero = h("div", { class: "hero" }, h("p", { class: "line" }, "Cost unknown", h("span", { text: ", " + fmt.tok(sub.tokens) + " tokens on the subscription" })),
+             h("p", { class: "muted", text: "No price is configured for " + unpriced.join(", ") +
+               ". Add them to prices_per_mtok in the config to compare against seats." }), aside);
   } else if (!o.seats.count) {
-    hero = h("div", { class: "hero" }, h("p", { class: "line" }, fmt.usd(api), h("span", { text: " at API prices" })),
-             h("p", { class: "muted", text: "No seats are configured, so there is nothing to compare against." }));
+    hero = h("div", { class: "hero" }, h("p", { class: "line" }, fmt.usd(api), h("span", { text: " of subscription use at API prices" })),
+             h("p", { class: "muted", text: "No seats are configured, so there is nothing to compare against." }), aside);
   } else {
     const top = Math.max(api, seats) || 1;
     const fill = h("i"); fill.style.width = (100 * api / top).toFixed(1) + "%";
     const mark = h("b", { title: "Seat cost" }); mark.style.left = (100 * seats / top).toFixed(1) + "%";
     const ratio = seats ? (api / seats) : 0;
     hero = h("div", { class: "hero" },
-      h("p", { class: "line" }, fmt.usd(api), h("span", { text: " at API prices, against " }), fmt.usd(seats),
+      h("p", { class: "line" }, fmt.usd(api), h("span", { text: " of subscription use at API prices, against " }), fmt.usd(seats),
         h("span", { text: " of seats" })),
-      h("p", { class: "muted", text: (o.cost.unpriced_models.length ? "At least " : "") +
+      h("p", { class: "muted", text: (unpriced.length ? "At least " : "") +
         ratio.toFixed(1) + "× what the seats cost over " + o.days + " days" +
-        (o.cost.unpriced_models.length ? ". Not priced: " + o.cost.unpriced_models.join(", ") : ".") }),
+        (unpriced.length ? ". Not priced: " + unpriced.join(", ") : ".") }),
       h("div", { class: "ratio", role: "img", "aria-label": "API-equivalent cost against seat cost" }, fill, mark),
       h("div", { class: "legend" }, h("span", { text: "API-equivalent" }), h("span", { class: "r", text: "Line: seats, " +
-        o.seats.count + " " + (o.seats.count === 1 ? "person" : "people") })));
+        o.seats.count + " " + (o.seats.count === 1 ? "person" : "people") })), aside);
   }
 
   const figs = h("div", { class: "figs" },
@@ -163,9 +169,26 @@ async function overview() {
      [o.hosts.stale ? "error" : "", fmt.n(o.hosts.count), o.hosts.stale ? "hosts, " + fmt.n(o.hosts.stale) + " quiet" : "hosts"]]
       .map(([cls, v, l]) => h("div", { class: "fig " + cls }, h("b", { text: v }), h("span", { text: l }))));
 
-  const provTotal = o.by_provider.reduce((a, p) => a + p.tokens, 0) || 1;
-  const split = h("div", { class: "split" }, o.by_provider.map(p => {
+  const provTotal = (sub.tokens + bedrock.tokens) || 1;
+  const split = h("div", { class: "split" }, o.providers.map(p => {
     const i = h("i", { class: p.provider }); i.style.width = (100 * p.tokens / provTotal) + "%"; return i; }));
+  const KINDS = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write", "Cache write"]];
+  const provider = (p, title, about, dollars) => h("section", { class: "provider " + p.provider },
+    h("h2", {}, h("span", { class: "key " + p.provider }), title,
+      h("small", { text: fmt.tok(p.tokens) + " tokens, " + (100 * p.tokens / provTotal).toFixed(p.tokens ? 1 : 0) + "% of all" })),
+    h("p", { class: "muted", text: about }),
+    p.models.length ? h("div", { class: "scroll" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", { text: "Model" }), KINDS.map(([, l]) => h("th", { class: "n", text: l })),
+        h("th", { class: "n", text: "All tokens" }), h("th", { class: "n", text: dollars }))),
+      h("tbody", {}, p.models.map(m => h("tr", {}, h("td", { text: m.model }),
+        KINDS.map(([k]) => h("td", { class: "n", title: fmt.n(m[k]), text: fmt.tok(m[k]) })),
+        h("td", { class: "n", title: fmt.n(m.tokens), text: fmt.tok(m.tokens) }),
+        h("td", { class: "n" + (m.usd === null ? " muted" : ""), text: fmt.usd(m.usd) })))),
+      h("tfoot", {}, h("tr", {}, h("td", { text: "Total" }),
+        KINDS.map(([k]) => h("td", { class: "n", title: fmt.n(p[k]), text: fmt.tok(p[k]) })),
+        h("td", { class: "n", title: fmt.n(p.tokens), text: fmt.tok(p.tokens) }),
+        h("td", { class: "n", text: p.usd === null ? "at least " + fmt.usd(p.priced_usd) : fmt.usd(p.usd) })))))
+      : h("p", { class: "empty", text: "No calls in this window." }));
 
   show(
     head("Overview", "Last " + o.days + " days", seg([[7, "7d"], [30, "30d"], [90, "90d"]], state.days,
@@ -174,17 +197,17 @@ async function overview() {
     h("section", { class: "cols" },
       h("div", {}, h("h2", { text: "Tokens by person" }), bars(o.by_user.slice(0, 12), "user", "tokens", r => fmt.tok(r.tokens))),
       h("div", {}, h("h2", { text: "Tokens per day" }), spark(o.daily))),
-    h("section", { class: "cols" },
-      h("div", {}, h("h2", { text: "Where the tokens went" }), split,
-        o.by_provider.map(p => h("span", { class: "key " + p.provider }, h("span", { text:
-          (p.provider === "bedrock" ? "Bedrock " : "Anthropic API ") + fmt.tok(p.tokens) }))),
-        h("table", {}, h("thead", {}, h("tr", {}, h("th", { text: "Model" }), h("th", { class: "n", text: "Tokens" }),
-          h("th", { class: "n", text: "At API prices" }))),
-          h("tbody", {}, o.by_model.map(m => h("tr", {}, h("td", { text: m.model }),
-            h("td", { class: "n", text: fmt.tok(m.tokens) }), h("td", { class: "n", text: fmt.usd(m.usd) })))))),
-      h("div", {}, h("h2", { text: "Blocked, by who decided" }),
-        bars(o.blocks.map(b => ({ source: decidedBy(b.source), count: b.count })), "source", "count",
-          r => fmt.n(r.count), "deny"))));
+    h("section", {}, h("h2", { text: "Where the tokens went" }), split,
+      h("p", { class: "muted", text: "Two bills, so two tables. A call is counted under Bedrock when its message id is one of Bedrock's." })),
+    provider(sub, "Claude subscription, through Anthropic",
+      "Paid for by seats, whatever the use. The last column is what the same tokens would cost at the configured API prices.",
+      "At API prices"),
+    provider(bedrock, "Amazon Bedrock",
+      "Billed by AWS for every token. The last column is an estimate from the configured prices; the AWS bill is the figure to trust.",
+      "Estimated bill"),
+    h("section", {}, h("h2", { text: "Blocked, by who decided" }),
+      bars(o.blocks.map(b => ({ source: decidedBy(b.source), count: b.count })), "source", "count",
+        r => fmt.n(r.count), "deny")));
 }
 
 // Logs -----------------------------------------------------------------------
@@ -201,7 +224,7 @@ const decidedBy = s => DECIDED_BY[s] || s;
 async function loadLogs(append) {
   const L = state.logs;
   const q = new URLSearchParams({ limit: 200, offset: append ? L.rows.length : 0 });
-  for (const k of ["user", "severity", "category"]) if (L[k]) q.set(k, L[k]);
+  for (const k of ["user", "severity", "category", "source", "tool"]) if (L[k]) q.set(k, L[k]);
   const r = await get("/api/events?" + q);
   L.rows = append ? L.rows.concat(r.rows) : r.rows;
   L.total = r.total; L.facets = r.facets; L.byCat = r.by_category;
@@ -211,9 +234,10 @@ async function logs(append) {
   await loadLogs(append);
   const L = state.logs;
   const pick = (k, v) => { L[k] = v; render(); };
-  const select = (k, label, opts) => h("label", {}, h("span", { class: "muted", text: label + " " }),
+  const select = (k, label, opts, name) => h("label", {}, h("span", { class: "muted", text: label + " " }),
     h("select", { onchange: e => pick(k, e.target.value) },
-      h("option", { value: "", text: "All" }), opts.map(o => h("option", { value: o, text: o, selected: o === L[k] }))));
+      h("option", { value: "", text: "All" }),
+      opts.map(o => h("option", { value: o, text: name ? name(o) : o, selected: o === L[k] }))));
   const allCount = L.byCat.reduce((a, c) => a + c.count, 0);
   const tabs = h("div", { class: "tabs", role: "tablist" },
     [["", "All", allCount]].concat(L.byCat.map(c => [c.category, CAT_LABEL[c.category], c.count]))
@@ -234,7 +258,8 @@ async function logs(append) {
     : h("p", { class: "empty", text: "No events match these filters." });
   show(
     head("Logs", fmt.n(L.total) + " events"),
-    h("div", { class: "filters" }, select("user", "Person", L.facets.users), select("severity", "Result", L.facets.severities)),
+    h("div", { class: "filters" }, select("user", "Person", L.facets.users), select("severity", "Result", L.facets.severities),
+      select("source", "Decided by", L.facets.sources, decidedBy), select("tool", "Tool", L.facets.tools)),
     tabs, table,
     L.rows.length < L.total ? h("button", { class: "more", type: "button", onclick: () => logs(true).catch(fail) },
       "Show 200 more of " + fmt.n(L.total - L.rows.length)) : null);
@@ -327,7 +352,7 @@ async function hosts() {
      ["deny", rows.filter(x => x.version_behind).length, "on an older Claude Code"],
      ["error", rows.filter(x => x.policy === "differs").length, "hold another policy"]]
       .map(([cls, v, l]) => h("div", { class: "fig " + (v ? cls : "") }, h("b", { text: fmt.n(v) }), h("span", { text: l }))));
-  const rule = "A host is quiet after " + r.stale_hours + " hours without a check-in. Its row is what it last sent, not zero." +
+  const rule = "A host is a machine Claude Code runs on. It is listed once it has checked in. A host is quiet after " + r.stale_hours + " hours without a check-in. Its row is what it last sent, not zero." +
     (r.expected_policy_sha256 ? "" : " No repository policy is configured (policy.source), so no host can be compared against one.");
   const table = rows.length ? h("div", { class: "scroll" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", { text: "Host" }), h("th", { text: "Last heard (UTC)" }),
@@ -395,51 +420,114 @@ async function policy() {
 
 // Update ---------------------------------------------------------------------
 // The one page that changes anything: it starts a command the config lists.
-// The request carries the action's id and nothing else.
-function ran(code, timedOut) {
-  if (timedOut) return ["error", "stopped at its time limit"];
-  if (code === null) return ["error", "no exit code: it was stopped or did not start"];
-  return [code === 0 ? "pass" : code === 1 ? "deny" : "error", "exit code " + code];
+// The request carries the action's id and nothing else. A run answers with its
+// number at once; what it prints is read a piece at a time while it runs, and
+// is kept, so #/update/<run> shows any run that is still kept.
+const POLL_MS = 700;
+const RUN_WORD = { running: ["info", "running"], "timed-out": ["error", "stopped at its time limit"],
+  "not-started": ["error", "could not start"], interrupted: ["error", "no result: the server stopped while it ran"] };
+function ran(r) {
+  if (r.state !== "done") return RUN_WORD[r.state];
+  return [r.exit_code === 0 ? "pass" : r.exit_code === 1 ? "deny" : "error", "exit code " + r.exit_code];
 }
-async function update() {
-  const U = state.update;
+const result = r => { const [cls, word] = ran(r); return h("span", { class: "sev " + cls, text: word }); };
+// the command as it could be typed: an argument with a space in it stays one argument
+const PLAIN_ARG = /^[A-Za-z0-9_\/.:=,@%+-]+$/;
+const typed = argv => argv.map(a => PLAIN_ARG.test(a) ? a : "'" + a.replace(/'/g, "'\\''") + "'").join(" ");
+const took = r => r.seconds === null ? "–" : r.seconds + " s";
+const printed = r => r.bytes === null ? "–" : fmt.bytes(r.bytes);
+
+async function update(want) {
+  const U = state.update, gen = ++U.gen;
   const r = await get("/api/actions");
-  const busy = r.running || U.started;
+  const label = new Map(r.actions.map(a => [a.id, a.label]));
+  const name = x => label.get(x.action) || x.action;
+  const wanted = /^[0-9]+$/.test(want) ? Number(want) : null;
+  const sel = r.runs.find(x => x.run === wanted) || r.runs.find(x => x.run === r.run) || r.runs[0] || null;
+  const first = sel ? await get("/api/run?id=" + sel.run + "&offset=0") : null;
+
   const start = async id => {
-    U.started = id; U.error = null;
-    render();
+    U.error = null;
     try {
       const res = await call("/api/run", { method: "POST",
         headers: { "Content-Type": "application/json", "X-Fleetdash-Run": r.run_key }, body: JSON.stringify({ id }) });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) U.error = { id, text: body.error || ("HTTP " + res.status) };
+      if (res.ok) { location.hash = "#/update/" + body.run; return; }
+      U.error = { id, text: body.error || ("HTTP " + res.status) };
     } catch (e) {
       U.error = { id, text: e.message };
     }
-    U.started = null;
     render();
   };
-  const one = a => {
-    const mine = busy === a.id, o = a.output;
-    const [cls, word] = o ? ran(o.exit_code, o.timed_out) : a.last ? ran(a.last.exit_code, false) : ["info", "never run"];
-    const when = o || a.last;
-    return h("section", { class: "action" },
-      h("div", { class: "what" }, h("h2", { text: a.label }), a.about ? h("p", { text: a.about }) : null,
-        h("p", { class: "cmd", text: a.command.join(" ") })),
-      h("div", { class: "go" },
-        h("button", { class: "btn primary", type: "button", disabled: busy ? "" : null, onclick: () => start(a.id) },
-          mine ? "Running…" : "Run"),
-        h("p", { class: "muted", text: "Stops after " + a.timeout_s + " s" })),
-      h("p", { class: "last", "aria-live": "polite" }, h("span", { class: "sev " + cls, text: mine ? "running" : word }),
-        when && !mine ? h("span", { class: "muted", text: " " + fmt.ts(when.ts) + " UTC, took " + when.seconds + " s" }) : null,
-        U.error && U.error.id === a.id ? h("span", { class: "err", text: " Not started: " + U.error.text + "." }) : null),
-      o && !mine ? [h("pre", { class: "out", tabindex: "0", text: o.output || "(no output)" }),
-        o.truncated ? h("p", { class: "muted", text: "The output was longer; this is its first part." }) : null] : null);
-  };
+  const command = a => h("article", { class: "command" },
+    h("h3", { text: a.label }), a.about ? h("p", { text: a.about }) : null,
+    h("p", { class: "cmd", text: typed(a.command) }),
+    h("p", { class: "muted", text: (a.cwd ? "In " + a.cwd + ". " : "") + "Stops after " + a.timeout_s + " s." }),
+    h("div", { class: "go" },
+      h("button", { class: "btn primary", type: "button", disabled: r.busy ? "" : null, onclick: () => start(a.id) },
+        r.running === a.id ? "Running…" : "Run"),
+      a.last ? h("a", { href: "#/update/" + a.last.run }, result(a.last), h("span", { class: "muted", text: " " + fmt.ts(a.last.ts) })) :
+        h("span", { class: "muted", text: "Never run" })),
+    U.error && U.error.id === a.id ? h("p", { class: "err", text: "Not started: " + U.error.text + "." }) : null);
+
+  let consolePane;
+  if (!first) {
+    consolePane = h("div", { class: "console" }, h("h2", { text: "Output" }),
+      h("p", { class: "empty", text: "Nothing has been run yet. Run a command and everything it prints appears here as it prints it." }));
+  } else {
+    const out = h("pre", { class: "out", tabindex: "0", "aria-label": "Output of run " + sel.run });
+    const note = h("p", { class: "muted" });
+    const facts = h("dl", { class: "facts" });
+    const draw = c => {
+      const x = c.run;
+      facts.replaceChildren(
+        h("dt", { text: "Command" }), h("dd", { class: "cmd", text: typed(x.command) }),
+        h("dt", { text: "Directory" }), h("dd", { class: x.cwd ? "cmd" : "muted", text: x.cwd || "the server's own" }),
+        h("dt", { text: "Started" }), h("dd", { text: fmt.ts(x.ts) + " UTC" }),
+        h("dt", { text: "Took" }), h("dd", { text: took(x) }),
+        h("dt", { text: "Printed" }), h("dd", { text: fmt.bytes(c.size) }),
+        h("dt", { text: "Result" }), h("dd", { "aria-live": "polite" }, result(x)));
+      note.textContent = c.cut ? "This is the first " + fmt.bytes(c.next) + ". All of it is in " + c.file + "."
+        : c.more ? "" : c.size ? "All of it, also kept in " + c.file + "." : "It printed nothing.";
+    };
+    out.textContent = first.output;
+    draw(first);
+    consolePane = h("div", { class: "console" },
+      h("h2", { text: "Run " + sel.run + ", " + name(sel) }), facts, out, note);
+    const follow = async c => {
+      while (c.more) {
+        if (c.run.state === "running") await new Promise(done => setTimeout(done, POLL_MS));
+        if (U.gen !== gen || main.dataset.page !== "update") return;
+        const was = c.run.state;
+        c = await get("/api/run?id=" + sel.run + "&offset=" + c.next);
+        if (U.gen !== gen) return;
+        // keep the newest line in view, unless the reader has scrolled back
+        const atEnd = out.scrollHeight - out.scrollTop - out.clientHeight < 24;
+        out.append(c.output);
+        if (atEnd) out.scrollTop = out.scrollHeight;
+        draw(c);
+        // it ended: the commands and the list of runs have a new result to show
+        if (c.run.state !== was) return render();
+      }
+    };
+    follow(first).catch(e => { if (U.gen === gen) fail(e); });
+  }
+
   show(
     head("Update", "Commands this dashboard is configured to run. Nothing else can be started from here."),
-    r.actions.length ? r.actions.map(one)
-      : h("p", { class: "empty", text: "No commands are configured. List them under actions in the config, each with its fixed arguments." }));
+    r.actions.length ? h("div", { class: "bench" },
+      h("div", { class: "commands" }, h("h2", { text: "Commands" }), r.actions.map(command)), consolePane)
+      : h("p", { class: "empty", text: "No commands are configured. List them under actions in the config, each with its fixed arguments." }),
+    r.runs.length ? h("section", {}, h("h2", { text: "Runs kept" }),
+      h("p", { class: "muted", text: "The newest runs, each with the command line it was started with and everything it printed." }),
+      h("div", { class: "scroll" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", { text: "Run" }), h("th", { text: "Started (UTC)" }), h("th", { text: "Command" }),
+          h("th", { text: "Result" }), h("th", { class: "n", text: "Took" }), h("th", { class: "n", text: "Printed" }))),
+        h("tbody", {}, r.runs.map(x => h("tr", { class: sel && x.run === sel.run ? "on" : null },
+          h("td", {}, h("a", { href: "#/update/" + x.run, "aria-current": sel && x.run === sel.run ? "true" : null }, "Run " + x.run)),
+          h("td", { class: "ts", text: fmt.ts(x.ts) }),
+          h("td", {}, name(x), h("div", { class: "cmd", text: typed(x.command) })),
+          h("td", {}, result(x)), h("td", { class: "n", text: took(x) }), h("td", { class: "n", text: printed(x) }))))))) : null);
 }
 
 // Docs -----------------------------------------------------------------------

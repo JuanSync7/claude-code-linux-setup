@@ -13,7 +13,9 @@ DNS rebinding.
 Everything is GET and changes nothing, except POST /api/run, which starts one
 of the commands the config lists (see actions.py) and asks for more: the
 run key, a small JSON body, and an Origin, when the browser sends one, that is
-the address the request itself was sent to.
+the address the request itself was sent to. It answers with the run's number
+as soon as the command has started; GET /api/run reads what that run has
+printed so far.
 """
 import hmac
 import json
@@ -187,12 +189,14 @@ def make_server(cfg, token=None, web=WEB):
             except RecursionError:
                 return self._json(400, {"error": "body nested too deeply"})
             try:
-                out = runner.run(body["id"])
+                run = runner.start(body["id"])
             except KeyError:
                 return self._json(404, {"error": "no such action"})
             except actions.Busy:
                 return self._json(409, {"error": "another action is running"})
-            self._json(200, out)
+            except actions.CannotStart as e:
+                return self._json(500, {"error": str(e)})
+            self._json(200, {"run": run})
 
         def _authed(self):
             given = self.headers.get("X-Fleetdash-Token") or ""
@@ -217,7 +221,7 @@ def make_server(cfg, token=None, web=WEB):
                     out = api.overview(cfg, days=_int(q, "days", 30, 1, 3650))
                 elif path == "/api/events":
                     out = api.events(cfg, user=_str(q, "user"), severity=_str(q, "severity"),
-                                     category=_str(q, "category"),
+                                     category=_str(q, "category"), source=_str(q, "source"), tool=_str(q, "tool"),
                                      limit=_int(q, "limit", 200, 1, 2000),
                                      offset=_int(q, "offset", 0, 0, 10 ** 9))
                 elif path == "/api/sessions":
@@ -238,6 +242,13 @@ def make_server(cfg, token=None, web=WEB):
                     out = docs.read(cfg, _str(q, "id") or "")
                 elif path == "/api/actions":
                     out = runner.listing()
+                elif path == "/api/run":
+                    if "id" not in q:
+                        raise ValueError("id is required")
+                    try:
+                        out = runner.read(_int(q, "id", 0, 1, 10 ** 12), _int(q, "offset", 0, 0, actions.OUTPUT_MAX))
+                    except KeyError:
+                        return self._json(404, {"error": "no such run: only the newest are kept"})
                 else:
                     return self._json(404, {"error": "no such endpoint"})
             except ValueError as e:

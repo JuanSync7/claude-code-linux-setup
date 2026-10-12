@@ -61,9 +61,20 @@ What every path has in common:
 - **Cost** comes from `prices_per_mtok` in the config, matched by the longest
   model-family prefix. A model with no price makes the total *unpriced*,
   never a smaller number that looks complete.
-- **Bedrock** is recognised by `bedrock_model_pattern` on the model id. That is
-  an inference from the id, not a billing record. An inference-profile ARN
+- **Bedrock** is recognised by the message id: a call's id starts with
+  `bedrock_id_prefix` when Bedrock answered it. The model name alone misses
+  most of them, because Bedrock usually answers with the same name the
+  subscription uses; `bedrock_model_pattern` catches the rest, the names
+  written the Bedrock way. Both are inferences from a transcript, not a
+  billing record, and the cost beside them is the configured prices times the
+  tokens: the AWS bill is the figure to trust. An inference-profile ARN
   carries an AWS account id, so it is reduced to a fixed label at ingest.
+- **The two providers are never added into one bill.** The Overview gives
+  each its own table of models, and sets only the subscription's tokens
+  against the seats: seats do not pay for Bedrock.
+- **`<synthetic>` is not a model.** Claude Code writes some messages itself
+  (an API error shown in the chat, for one) and records them under that name
+  with no tokens. They are stored, and left out of every model table.
 - **Seats** come from the config and are prorated to the window (30-day month).
 
 ### The feed
@@ -197,11 +208,25 @@ anything, and it asks for more than a GET does:
 The request names an action and nothing else. The argument list, working
 directory and time limit come from the config's `actions`, so nothing a
 browser sends reaches a command line, and no shell is involved. One action
-runs at a time (a second is answered 409), the page is shown at most 256 KiB
-of its output, a run past its time limit is killed with its process group, and
-a run is recorded with its time, exit code and duration. An
-action runs as the dashboard's account, with that account's rights: a site
-that lists a command there has decided that account may run it.
+runs at a time (a second is answered 409), and a run past its time limit is
+killed with its process group. An action runs as the dashboard's account,
+with that account's rights: a site that lists a command there has decided
+that account may run it.
+
+A run is recorded before it starts, not after it ends: its number, when, the
+argument list and directory it was started with, and a file under `runs.dir`
+(owner-only) that the command's output and errors are written straight into.
+If the row or the file cannot be made, nothing is started: a command whose
+output would be lost is not run. The request answers with the run's number at
+once, and `GET /api/run?id=&offset=` reads what the run has printed from
+that offset on, at most 64 KiB a time, so the page shows the output while the
+command is still printing it. When it ends the row gets its state (`done`
+with an exit code, `timed-out`, or `not-started` with the reason in the
+output), its duration and how much it printed. The page reads the first
+1 MiB of a run's output and names the file for the rest. The newest
+`runs.keep` runs are kept, rows and files; an older one is answered 404. A
+run still marked as running that the server is not running was left by a
+server that stopped: it is shown as interrupted, with no result.
 
 ## What the figures can be trusted for
 
@@ -303,13 +328,13 @@ dashboard does not make it.
 
 | Page | Shows |
 | --- | --- |
-| Overview | API-price equivalent against seats; tokens, people, blocks, hidden credentials, API errors, limit hits, chat storage, hosts; tokens by person and per day; Anthropic against Bedrock; blocks by the layer that decided |
-| Logs | Every event, filtered by person and result, one tab per category, with the host when the rows carry one |
+| Overview | API-price equivalent against seats; tokens, people, blocks, hidden credentials, API errors, limit hits, chat storage, hosts; tokens by person and per day; a table of models for the subscription and another for Bedrock, each with input, output, cache-read and cache-write tokens and their cost at the configured prices; blocks by the layer that decided |
+| Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one |
 | Chat storage | Size by age band, by person, and the largest chats |
 | People | Everyone with use or a seat: tokens, API-price equivalent against the seat's cost, active days, last use, five-hour and weekly limit hits, and why someone looks under-used (never used, unused for `idle_days`, under `median_fraction` of the median). The table downloads as CSV, for a report |
 | Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
 | Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets |
-| Update | The commands the config lists, each with a Run button, the last result and its output |
+| Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
 | Docs | The Markdown documents under the directories the config lists, rendered in the page. A link to another listed document opens it; any other relative link stays text |
 
 Docs are rendered by a small reader in `web/app.js` that covers headings,
@@ -382,7 +407,8 @@ purpose and a test must go red.
 - A click on Run, and on Download CSV, is not covered by an automated
   browser test: the browser tests read a rendered page and cannot click. The
   requests the buttons send are covered at process level, and the page's
-  display of a result in the browser.
+  display of a finished run in the browser; following a run while it prints
+  is covered at the API, not in the browser.
 - The token is in the address a person opens, so it is in that browser's
   history until the entry is removed, and in the tab's storage until the tab
   closes. Someone who takes over the port after the server stops is a
@@ -390,11 +416,20 @@ purpose and a test must go red.
   outlives a restart, so stop sharing the address when the service moves.
 - Each connection is a thread and nothing caps how many are open at once; an
   idle one is closed after 30 seconds.
-- A run is recorded after it ends. If the store cannot be written then, the
-  request fails and that run has no record.
+- If the store cannot be written when a run ends, the run keeps its output
+  file and its row stays as it was at the start; after the next server start
+  it is shown as interrupted, although it finished.
 - A command that starts its own session outlives its time limit: only the
-  process group the run began is killed. A command's output goes to a
-  temporary file with no size limit until the time limit stops it.
+  process group the run began is killed. A command's output goes to its file
+  under `runs.dir` with no size limit until the time limit stops it.
+- A command line is shown as it is configured and as it was started. An
+  argument that holds a secret would be shown too: keep secrets out of
+  `actions`, in a file the command reads.
+- The Overview and People queries read every usage row in the window. On one
+  person's history (some three hundred thousand rows) they answer in about
+  half a second; a fleet's history needs a per-day summary table first.
+- The People page's cost is one figure per person, subscription and Bedrock
+  together; only the Overview separates them.
 - The page's Markdown reader is written for the repository's own documents;
   a document built to be slow to read can stall the tab that opens it.
 - With direct ingest, one collector reads one host's files, and lines appended

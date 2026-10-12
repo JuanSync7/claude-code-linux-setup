@@ -176,8 +176,8 @@ class Serve(unittest.TestCase):
         listing = self.srv.json("/api/actions")
         self.assertEqual([a["id"] for a in listing["actions"]], ["say-hello"])
         before = count(self.f.store, "runs")
-        status, out = self.srv.post("/api/run", {"id": "say-hello"}, {"X-Fleetdash-Run": listing["run_key"]})
-        self.assertEqual((status, out["exit_code"], out["output"]), (200, 0, "hello from the action\n"))
+        out = self.srv.run("say-hello")
+        self.assertEqual((out["state"], out["exit_code"], out["output"]), ("done", 0, "hello from the action\n"))
         self.assertEqual(count(self.f.store, "runs"), before + 1)
         self.assertEqual(self.srv.json("/api/actions")["actions"][0]["last"]["exit_code"], 0)
 
@@ -208,7 +208,7 @@ class Serve(unittest.TestCase):
     def test_the_data_the_fleet_holds_comes_back(self):
         o = self.srv.json("/api/overview?days=3650")
         self.assertEqual(sorted(u["user"] for u in o["by_user"]), ["alice", "bob"])
-        self.assertEqual({p["provider"] for p in o["by_provider"]}, {"anthropic", "bedrock"})
+        self.assertEqual({p["provider"] for p in o["providers"] if p["tokens"]}, {"anthropic", "bedrock"})
         self.assertEqual(o["blocks"], [{"source": "Blocked by rule", "count": 1}])
         p = self.srv.json("/api/people?days=3650")
         self.assertEqual({r["user"]: r["five_hour"] for r in p["rows"]}, {"alice": 1, "bob": 0})

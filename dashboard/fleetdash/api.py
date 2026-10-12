@@ -10,9 +10,10 @@ import json
 import re
 
 from fleetdash import ingest, store
-from fleetdash.vocab import CATEGORIES, SEVERITIES
+from fleetdash.vocab import CATEGORIES, NOT_A_MODEL, PROVIDERS, SEVERITIES
 
 MONTH_DAYS = 30.0
+TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
 
 
 def _now(now):
@@ -45,14 +46,57 @@ def status(cfg):
     return {"host_label": cfg["host_label"], "last_ingest": last["v"] if last else None}
 
 
+def _usd(p, m):
+    return (m["input"] * p["input"] + m["output"] * p["output"] + m["cache_read"] * p["cache_read"]
+            + m["cache_write"] * p["cache_write"]) / 1e6
+
+
+def _providers(cfg, rows):
+    """One table per provider: its models, each with its token counts and
+    what they cost at the configured prices. A call is Bedrock's when its
+    message id starts the way Bedrock's do, or its model is named the Bedrock
+    way. Bedrock answers with the plain model name, so the name alone misses
+    most of them. A provider with an unpriced model has no total."""
+    named = re.compile(cfg["bedrock_model_pattern"])
+    models = {}
+    for r in rows:
+        prov = "bedrock" if r["by_id"] or named.search(r["model"]) else "anthropic"
+        m = models.setdefault((prov, r["model"]), dict.fromkeys(TOKEN_KINDS, 0))
+        for k in TOKEN_KINDS:
+            m[k] += r[k]
+    out = []
+    for prov in PROVIDERS:
+        table = {"provider": prov, "tokens": 0, "priced_usd": 0.0, "unpriced_models": [], "models": []}
+        table.update(dict.fromkeys(TOKEN_KINDS, 0))
+        for (p, model), m in sorted(models.items()):
+            if p != prov:
+                continue
+            tokens = sum(m[k] for k in TOKEN_KINDS)
+            price = _price(cfg, model)
+            usd = None if price is None else _usd(price, m)
+            if usd is not None:
+                table["priced_usd"] += usd
+            elif tokens:
+                table["unpriced_models"].append(model)
+            for k in TOKEN_KINDS:
+                table[k] += m[k]
+            table["tokens"] += tokens
+            table["models"].append(dict(m, model=model, tokens=tokens, usd=usd))
+        table["usd"] = None if table["unpriced_models"] else table["priced_usd"]
+        out.append(table)
+    return out
+
+
 def overview(cfg, days=30, now=None):
     since = _since(now, days)
-    bedrock = re.compile(cfg["bedrock_model_pattern"])
+    prefix = cfg["bedrock_id_prefix"]
     con = store.connect(cfg)
     try:
         models = con.execute(
-            "select model, sum(input) i, sum(output) o, sum(cache_read) cr, sum(cache_write) cw "
-            "from usage where ts>=? group by model order by model", (since,)).fetchall()
+            "select length(?)>0 and substr(id,1,length(?))=? by_id, model, sum(input) input, "
+            "sum(output) output, sum(cache_read) cache_read, sum(cache_write) cache_write "
+            "from usage where ts>=? and model!=? group by by_id, model",
+            (prefix, prefix, prefix, since, NOT_A_MODEL)).fetchall()
         by_user = con.execute(
             "select user, sum(input+output+cache_read+cache_write) tokens, sum(input) input, "
             "sum(output) output, sum(cache_read) cache_read, sum(cache_write) cache_write, "
@@ -73,22 +117,9 @@ def overview(cfg, days=30, now=None):
     finally:
         con.close()
     stale_before = _stale_before(cfg, now)
-
-    providers, priced, unpriced = {}, 0.0, []
-    model_rows = []
-    for m in models:
-        tokens = m["i"] + m["o"] + m["cr"] + m["cw"]
-        prov = "bedrock" if bedrock.search(m["model"]) else "anthropic"
-        providers[prov] = providers.get(prov, 0) + tokens
-        p = _price(cfg, m["model"])
-        usd = None
-        if p is not None:
-            usd = (m["i"] * p["input"] + m["o"] * p["output"] + m["cr"] * p["cache_read"]
-                   + m["cw"] * p["cache_write"]) / 1e6
-            priced += usd
-        elif tokens:
-            unpriced.append(m["model"])
-        model_rows.append({"model": m["model"], "provider": prov, "tokens": tokens, "usd": usd})
+    providers = _providers(cfg, models)
+    priced = sum(p["priced_usd"] for p in providers)
+    unpriced = sorted({m for p in providers for m in p["unpriced_models"]})
 
     seat_users = sorted({u for s in cfg["seats"] for u in s["users"]})
     seat_usd = sum(s["monthly_usd"] * len(s["users"]) for s in cfg["seats"]) * days / MONTH_DAYS
@@ -98,8 +129,7 @@ def overview(cfg, days=30, now=None):
         "days": days,
         "last_ingest": last["v"] if last else None,
         "by_user": [dict(r) for r in by_user],
-        "by_provider": [{"provider": k, "tokens": v} for k, v in sorted(providers.items())],
-        "by_model": model_rows,
+        "providers": providers,
         "daily": [dict(r) for r in daily],
         "cost": {"priced_usd": priced, "unpriced_models": unpriced,
                  "total_usd": None if unpriced else priced},
@@ -113,36 +143,39 @@ def overview(cfg, days=30, now=None):
     }
 
 
-def events(cfg, user=None, severity=None, category=None, limit=200, offset=0):
+def events(cfg, user=None, severity=None, category=None, source=None, tool=None, limit=200, offset=0):
     if severity is not None and severity not in SEVERITIES:
         raise ValueError("unknown severity %r" % severity)
     if category is not None and category not in CATEGORIES:
         raise ValueError("unknown category %r" % category)
-    where, args = [], []
-    for col, val in (("user", user), ("severity", severity), ("category", category)):
-        if val is not None:
-            where.append(col + "=?")
-            args.append(val)
-    clause = (" where " + " and ".join(where)) if where else ""
+    given = [(col, val) for col, val in (("user", user), ("severity", severity), ("category", category),
+                                         ("source", source), ("tool", tool)) if val is not None]
+
+    def where(filters):
+        clause = " where " + " and ".join(col + "=?" for col, _ in filters) if filters else ""
+        return clause, [val for _, val in filters]
+
+    clause, args = where(given)
+    # the tab counts ignore the category filter, so every tab stays visible
+    tab_clause, tab_args = where([f for f in given if f[0] != "category"])
     con = store.connect(cfg)
     try:
         total = con.execute("select count(*) from events" + clause, args).fetchone()[0]
         rows = con.execute("select ts, user, session, severity, category, source, tool, detail, host "
                            "from events" + clause + " order by ts desc, key limit ? offset ?",
                            args + [limit, offset]).fetchall()
-        # the tab counts ignore the category filter, so every tab stays visible
-        tab_where = [w for w in where if not w.startswith("category")]
-        tab_args = [a for a, w in zip(args, where) if not w.startswith("category")]
-        tab_clause = (" where " + " and ".join(tab_where)) if tab_where else ""
         by_cat = con.execute("select category, count(*) n from events" + tab_clause + " group by category",
                              tab_args).fetchall()
-        users = [r[0] for r in con.execute("select distinct user from events order by user")]
+        # what is stored, so a filter never offers a value that matches nothing at all
+        distinct = {col: [r[0] for r in con.execute(
+            "select distinct %s from events where %s!='' order by 1" % (col, col))] for col in ("user", "source", "tool")}
     finally:
         con.close()
     present = {r["category"]: r["n"] for r in by_cat}
     return {"total": total, "rows": [dict(r) for r in rows],
             "by_category": [{"category": c, "count": present.get(c, 0)} for c in CATEGORIES],
-            "facets": {"users": users, "severities": list(SEVERITIES), "categories": list(CATEGORIES)}}
+            "facets": {"users": distinct["user"], "sources": distinct["source"], "tools": distinct["tool"],
+                       "severities": list(SEVERITIES), "categories": list(CATEGORIES)}}
 
 
 def _age_days(now, ts):

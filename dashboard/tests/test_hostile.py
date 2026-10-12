@@ -310,7 +310,7 @@ class Client(unittest.TestCase):
         # ssh -L 9999:127.0.0.1:<port>: the browser names the port it sees
         status, _, body = self.call("POST", "/api/run", b'{"id":"ok"}', X_Fleetdash_Run=self.key(),
                                     Host="127.0.0.1:9999", Origin="http://127.0.0.1:9999")
-        self.assertEqual((status, json.loads(body.decode())["exit_code"]), (200, 0))
+        self.assertEqual((status, json.loads(body.decode())), (200, {"run": 1}))
 
     def test_a_run_from_a_page_on_another_port_or_site_is_refused(self):
         key = self.key()
