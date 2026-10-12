@@ -9,9 +9,10 @@ one transaction, so a crash or a second run never double-counts. A file that
 shrank or changed inode was rotated: it is read again from the start under a
 new generation, which keeps its line keys distinct from the old file's.
 
-Only shape is kept: from a transcript, the token counts, model, and the names
-of the slash command, skill or plugin, never the text of a message or the
-arguments of a command.
+What is kept from a transcript is its shape: the token counts, model, and the
+names of the slash command, skill or plugin, never the text of a message. A
+tool call that was stopped is the one exception: it is an incident, and what
+was asked for is kept with it (see incident()).
 
 A run also records this host's check-in (its Claude Code version and the hash
 of the policy it holds), and reads the feed spool and the privileged
@@ -31,12 +32,20 @@ import string
 import subprocess
 
 from fleetdash import store
-from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES
+from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES, INPUT_KINDS
 
 CHUNK = 8 << 20
 # no real record comes near this; a longer line is a bad record, not a buffer
 LINE_MAX = 64 << 20
 DETAIL_MAX = 500
+# What a stopped call asked for, and what Claude was told about it, are kept
+# to this length (see cut()); a directory or branch to PLACE_MAX; and at most
+# FIELDS_MAX of the call's field names.
+INPUT_MAX = 2000
+# room for the note cut() leaves in the middle of a text it shortened
+CUT_NOTE_MAX = 64
+PLACE_MAX = 1024
+FIELDS_MAX = 32
 # Timestamps are compared as text, so only one form is accepted: UTC ISO 8601,
 # as Claude Code ("...Z") and the hooks ("...+00:00") write it. Anything else
 # would sort outside the real range: "zzz" or year 9999 sits inside every
@@ -141,6 +150,7 @@ def checkin(cfg, now=None):
 
 # each part is short enough to be read as a number wherever versions are ordered
 VERSION = r"[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}"
+VERSION_RE = re.compile(VERSION)
 
 
 def claude_version(binary):
@@ -288,6 +298,58 @@ def event(key, ts, user, session, severity, category, source, tool, detail, host
              text(source), text(tool), text(detail)[:DETAIL_MAX], host))
 
 
+def cut(v, most=INPUT_MAX):
+    """Text held to about `most` characters by keeping both ends, as the
+    denial hook does: a cap that keeps only the head lets padding push the
+    part that matters out of the record."""
+    if len(v) <= most:
+        return v
+    return v[:most // 2] + "...[%d characters cut]..." % (len(v) - most) + v[-(most // 2):]
+
+
+def incident(key, asked=None, fields=None, said="", cwd="", branch="", client="", call_id="", length=None):
+    """The record of one stopped call, beside its event (same key): what was
+    asked for, as (which field of the call, its text), or None when the call
+    was not seen or has no such field; the names of the call's fields, None
+    when it was not seen; what Claude was told; and where and under which
+    client it happened. The two long texts come already shortened by cut(),
+    with `length` what the first was before: a text cut twice would lose the
+    note the first cut left, so here they are only held to a hard limit."""
+    kind, value = asked or ("", None)
+    held = INPUT_MAX + CUT_NOTE_MAX
+    return ("insert or ignore into incidents values (?,?,?,?,?,?,?,?,?,?)",
+            (_hash(key), None if value is None else value[:held], kind,
+             None if value is None else len(value) if length is None else length,
+             None if fields is None else json.dumps(fields), said[:held], cwd[:PLACE_MAX], branch[:PLACE_MAX],
+             client, call_id))
+
+
+def asked(given):
+    """From a tool call's input: (which field says what was asked for, its
+    text) or None, and the names of its fields. The fields kept are those in
+    INPUT_KINDS (a command, a file, a URL, a path); what a call would have
+    written to a file, or sent to another tool, is the person's work and is
+    not."""
+    if not isinstance(given, dict):
+        return None, []
+    what = next(((k, given[k]) for k in INPUT_KINDS
+                 if isinstance(given.get(k), str) and given[k] and storable(given[k])), None)
+    return what, sorted(k for k in given if _code(k))[:FIELDS_MAX]
+
+
+def _plain(v):
+    """A field that should be text, as text: anything else is left out."""
+    return v if isinstance(v, str) and storable(v) else ""
+
+
+def _told(content):
+    """What a tool result says, from its text or its text parts."""
+    if isinstance(content, list):
+        return "\n".join(p["text"] for p in content if isinstance(p, dict) and p.get("type") == "text"
+                         and _plain(p.get("text")))
+    return _plain(content)
+
+
 def storable(s):
     """Whether the store can hold this text. JSON can spell half of a
     surrogate pair, and a file name can hold bytes that are not UTF-8; neither
@@ -362,8 +424,15 @@ class _hook_reader(object):
     def take(self, rec, key):
         ts, session, tool = timestamp(rec.get("ts")), rec.get("session"), rec.get("tool")
         if self.kind == "denied":
+            # the hook says what was asked for and not which field it was, and
+            # nothing of what Claude was told; its length is the hook's count
+            # where it is one, as the hook cuts too
+            what, n = _plain(rec.get("detail")), rec.get("detail_len")
             return [event(key, ts, self.user, session, "deny", "denial",
-                           rec.get("denied_by"), tool, rec.get("detail"), self.host)]
+                           rec.get("denied_by"), tool, rec.get("detail"), self.host),
+                    incident(key, ("", cut(what)) if what else None,
+                             length=n if isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= SIZE_MAX
+                             else len(what))]
         if rec.get("event") == "redaction":
             kinds = rec.get("kinds")
             kinds = ",".join(text(k) for k in kinds) if isinstance(kinds, list) else text(kinds)
@@ -484,7 +553,7 @@ class _transcript_reader(object):
         self.path, self.user, self.project = path, user, project
         self.session = os.path.basename(path)[:-len(".jsonl")]
         self.records, self.first, self.last = 0, None, None
-        self.calls = collections.OrderedDict()  # tool call id -> tool name
+        self.calls = collections.OrderedDict()  # tool call id -> (tool name, what it asked for, its field names)
 
     def restart(self, con):
         con.execute("delete from sessions where user=? and path=?", (self.user, self.path))
@@ -547,22 +616,32 @@ class _transcript_reader(object):
                                rec["attributionPlugin"]))
         content = msg.get("content") if isinstance(msg.get("content"), list) else []
         for part in content:
-            # the name of the tool only: its input is the person's work
+            # the tool's name, and what it asked for in case the call is stopped
             if (isinstance(part, dict) and part.get("type") == "tool_use"
                     and isinstance(part.get("id"), str) and len(part["id"]) <= CODE_MAX
                     and _code(part.get("name"), TOOL_CHARS)):
-                self.calls[part["id"]] = part["name"]
+                what, fields = asked(part.get("input"))
+                self.calls[part["id"]] = (part["name"], what and (what[0], cut(what[1])), fields, what and len(what[1]))
                 if len(self.calls) > CALLS_REMEMBERED:
                     self.calls.popitem(last=False)
         if rec.get("toolDenialKind"):
             kind = text(rec["toolDenialKind"])
-            # a call read in an earlier run is not remembered: its tool is unknown, left empty
-            tool = next((self.calls[part["tool_use_id"]] for part in content if isinstance(part, dict)
-                         and isinstance(part.get("tool_use_id"), str) and part["tool_use_id"] in self.calls), "")
+            result = next((part for part in content if isinstance(part, dict)
+                           and isinstance(part.get("tool_use_id"), str) and len(part["tool_use_id"]) <= CODE_MAX
+                           and storable(part["tool_use_id"])), {})
+            # a call read in an earlier run is not remembered: its tool and what it asked for are unknown
+            tool, what, fields, length = self.calls.get(result.get("tool_use_id"), ("", None, None, None))
             decision = rec.get("permissionDecision") if isinstance(rec.get("permissionDecision"), dict) else {}
             why = decision.get("reasonType") if _code(decision.get("reasonType")) else ""
             rows.append(event(base + "|denial", ts, self.user, session,
                                "info" if kind in PERSON_DENIALS else "deny", "denial", kind, tool, why))
+            version = _plain(rec.get("version"))
+            rows.append(incident(
+                base + "|denial", what, fields,
+                # what a person typed when they said no is a message, and no message is kept
+                "" if kind in PERSON_DENIALS else cut(_told(result.get("content"))),
+                _plain(rec.get("cwd")), _plain(rec.get("gitBranch")),
+                version if VERSION_RE.fullmatch(version) else "", result.get("tool_use_id", ""), length))
         cmd = rec.get("commandRun")
         if isinstance(cmd, dict) and cmd.get("command"):
             # the name only: the rest of the line is the person's arguments

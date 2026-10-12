@@ -6,7 +6,7 @@
 | `config.py` | Loads the config: every key required, no unknown key at any level, loopback-only bind, under-use rules in range |
 | `vocab.py` | The closed sets of severities and categories |
 | `store.py` | SQLite schema and its version, owner-only creation, refusal of a store written under another version, per-severity retention (`prune`) |
-| `ingest.py` | Reads hook logs and transcripts past their checkpoint; keeps shape, never content; refuses files that are not what their path claims; reads the privileged session's log; records the host's check-in |
+| `ingest.py` | Reads hook logs and transcripts past their checkpoint; keeps shape, not content, but for what a stopped call asked for; refuses files that are not what their path claims; reads the privileged session's log; records the host's check-in |
 | `feed.py` | `feed`: one person's own rows, from a private store, written as one batch file into the spool |
 | `spool.py` | The collector's side of the feed: reads each batch as its file's owner, checks every row, removes the batch once stored |
 | `api.py` | The queries behind the pages: overview, events, sessions, people (and its CSV), hosts, policy, status, and the Admin page's privileged sessions, enrolment and retention |

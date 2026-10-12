@@ -16,7 +16,7 @@ import stat
 
 from fleetdash import ingest, store
 from fleetdash.feed import BATCH_MAX, BATCH_VERSION
-from fleetdash.vocab import CATEGORIES, SEVERITIES
+from fleetdash.vocab import CATEGORIES, INPUT_KINDS, SEVERITIES
 
 SUFFIX = ".jsonl"
 NAME_MAX = 255
@@ -181,6 +181,19 @@ def _row(d, user):
         return ingest.event("%s|%s" % (user, _name(d["key"])), ingest.timestamp(d["ts"]), user, _str(d["session"]),
                             d["severity"], d["category"], _str(d["source"]), _str(d["tool"]),
                             _str(d["detail"]), _str(d["host"])[:NAME_MAX])
+    if kind == "incident":
+        if d["input_kind"] not in INPUT_KINDS + ("",):
+            raise ValueError("outside the vocabulary")
+        fields = d["fields"] if d["fields"] is None else json.loads(_str(d["fields"]))
+        if fields is not None and (not isinstance(fields, list) or len(fields) > ingest.FIELDS_MAX
+                                   or not all(ingest._code(f) for f in fields)):
+            raise ValueError("not a list of a call's field names")
+        # keyed as its event is, so it lands beside the event the same batch carries
+        return ingest.incident(
+            "%s|%s" % (user, _name(d["key"])), None if d["input"] is None else (d["input_kind"], _str(d["input"])),
+            fields, _str(d["said"]), _str(d["cwd"]), _str(d["branch"]), _opt(d["client"] or None, VERSION_RE) or "",
+            _str(d["call_id"])[:ingest.CODE_MAX],
+            None if d["input"] is None else ingest.count(d["input_len"], ingest.SIZE_MAX))
     if kind == "usage":
         return ("insert or replace into usage values (?,?,?,?,?,?,?,?,?)", (
             _name(d["id"]), ingest.timestamp(d["ts"]), user, _str(d["session"]),

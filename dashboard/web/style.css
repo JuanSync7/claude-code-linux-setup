@@ -172,6 +172,14 @@ td .cmd { font-size: 12px; max-width: 520px; }
 section > h3 { font-size: 14px; font-weight: 600; margin: 24px 0 8px; }
 td > .flag:first-child { margin-left: 0; }
 summary { cursor: pointer; }
+/* a stopped call: one line of what was asked for, and its record beneath when opened */
+.incident > summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 460px; }
+.incident[open] > summary { white-space: normal; }
+.incident .facts { margin: 10px 0 6px; font-family: inherit; word-break: normal; }
+.incident .facts dd { overflow-wrap: anywhere; }
+.asked { margin: 0; padding: 8px 10px; background: var(--paper); border: 1px solid var(--rule); border-radius: 7px;
+         white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; font-size: 12.5px; }
+.incident p { margin: 4px 0 0; font-size: 12px; }
 .ran { list-style: none; margin: 8px 0 4px; padding: 0; }
 .ran li { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
 .ran .ts { color: var(--graphite); }

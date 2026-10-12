@@ -54,3 +54,7 @@ ADMIN_LOG_STATES = (
     "unreadable",      # there, and it could not be opened or was refused
     "read",
 )
+
+# Which field of a stopped tool call says what it asked for, in the order the
+# denial hook looks for them. Nothing else of a call's input is kept.
+INPUT_KINDS = ("command", "file_path", "url", "path")

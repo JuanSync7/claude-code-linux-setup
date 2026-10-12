@@ -95,6 +95,21 @@ create table if not exists admin_log (
     detail  text not null       -- the rest of the line
 );
 
+-- One row per stopped tool call, beside its event: what the event's one line
+-- cannot hold. Removed with its event.
+create table if not exists incidents (
+    key        text primary key,  -- the event's
+    input      text,              -- what was asked for, cut to a length; NULL: not known
+    input_kind text not null,     -- vocab.INPUT_KINDS; '' when the source does not say which
+    input_len  integer,           -- its length before it was cut; NULL with input
+    fields     text,              -- JSON list: the names of the call's fields; NULL: the call was not seen
+    said       text not null,     -- what Claude was told; '' when a person refused it or nothing was said
+    cwd        text not null,     -- the directory the session was in; '' unknown, as for the next three
+    branch     text not null,
+    client     text not null,     -- the Claude Code version
+    call_id    text not null      -- the tool call's id in the transcript
+);
+
 create table if not exists meta (k text primary key, v text not null);
 """
 
@@ -170,6 +185,7 @@ def prune(cfg, now=None):
                     (sev, sev, rule["max_rows"])).rowcount
                 if n:
                     removed[sev] = n
+            con.execute("delete from incidents where key not in (select key from events)")
         con.execute("vacuum")
     finally:
         con.close()

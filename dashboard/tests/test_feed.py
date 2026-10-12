@@ -53,7 +53,7 @@ class Pushed(unittest.TestCase):
     def test_a_feed_then_an_ingest_lands_the_persons_rows_and_empties_the_spool(self):
         self.use()
         sent = feed.run(self.feeder())["sent"]
-        self.assertEqual(sent, {"event": 2, "usage": 1, "session": 1})
+        self.assertEqual(sent, {"event": 2, "incident": 1, "usage": 1, "session": 1})
         self.assertEqual(len(self.batches()), 1)
         stats = ingest.run(self.collector)
         self.assertEqual((stats["bad_lines"], stats["skipped"]), (0, []))
@@ -61,6 +61,9 @@ class Pushed(unittest.TestCase):
         self.assertEqual(rows(self.db, "select user, bytes > 0 from sessions"), [(ME, 1)])
         self.assertEqual(sorted(rows(self.db, "select category, host from events")),
                          [("denial", "host-a"), ("skill", "")])
+        # what the stopped call asked for arrives beside its event
+        self.assertEqual(rows(self.db, "select e.host, i.input, i.input_len, i.said from incidents i "
+                              "join events e on e.key=i.key"), [("host-a", "sudo x", 6, "")])
         self.assertEqual(self.batches(), [])
 
     def test_a_second_feed_sends_only_what_is_new_and_a_changed_message_replaces_its_row(self):
@@ -69,13 +72,24 @@ class Pushed(unittest.TestCase):
         # the same message id, written again with more output, as streaming does
         self.f.transcript(ME, "p1", "s1", [assistant("u9", "m1", TS, "claude-opus-5-5", usage(o=50))])
         sent = feed.run(self.feeder())["sent"]
-        self.assertEqual(sent, {"event": 0, "usage": 1, "session": 1})
+        self.assertEqual(sent, {"event": 0, "incident": 0, "usage": 1, "session": 1})
         ingest.run(self.collector)
         self.assertEqual(rows(self.db, "select id, output from usage"), [("m1", 50)])
 
+    def test_reading_a_log_a_second_time_sends_no_stopped_call_again(self):
+        self.use()
+        feed.run(self.feeder())
+        # the private store forgets how far it read, so every line is read again
+        con = sqlite3.connect(os.path.join(self.f.root, "state", "store.db"))
+        with con:
+            con.execute("delete from checkpoints")
+        con.close()
+        sent = feed.run(self.feeder())["sent"]
+        self.assertEqual((sent["event"], sent["incident"]), (0, 0))
+
     def test_a_feed_with_nothing_new_still_checks_the_host_in(self):
         sent = feed.run(self.feeder())["sent"]
-        self.assertEqual(sent, {"event": 0, "usage": 0, "session": 0})
+        self.assertEqual(sent, {"event": 0, "incident": 0, "usage": 0, "session": 0})
         ingest.run(self.collector)
         self.assertEqual(rows(self.db, "select host, reported_by from hosts where host='host-a'"),
                          [("host-a", ME)])
@@ -182,6 +196,56 @@ class HostileBatches(unittest.TestCase):
              "source": "rule", "tool": "Bash", "detail": "x", "host": "host-a"}
         e.update(over)
         return e
+
+    def incident(self, **over):
+        i = {"t": "incident", "key": "k1", "input": "sudo x", "input_kind": "command", "input_len": 6,
+             "fields": '["command"]', "said": "Refused", "cwd": "/w", "branch": "main", "client": "2.1.0", "call_id": "t1"}
+        i.update(over)
+        return i
+
+    INCIDENTS = "select e.user, i.input, i.input_kind, i.input_len, i.fields, i.said, i.cwd, i.branch, i.client, " \
+                "i.call_id from incidents i join events e on e.key=i.key order by i.input"
+
+    def test_an_incident_lands_beside_its_event_under_the_files_owner(self):
+        self.batch([self.incident(), self.event(), self.incident(key="k2", input=None, input_kind="", input_len=None,
+                                                                 fields=None, said="", cwd="", branch="", client=""),
+                    self.event(key="k2")])
+        stats = ingest.run(self.cfg)
+        self.assertEqual(stats["bad_lines"], 0)
+        self.assertEqual(rows(self.db, self.INCIDENTS), [
+            (ME, None, "", None, None, "", "", "", "", "t1"),
+            (ME, "sudo x", "command", 6, '["command"]', "Refused", "/w", "main", "2.1.0", "t1")])
+
+    def test_an_incident_cannot_be_written_over_another_persons(self):
+        ingest.run(self.cfg)
+        con = sqlite3.connect(self.db)
+        with con:
+            con.execute(*ingest.event("victim|k1", TS, "victim", "s", "deny", "denial", "rule", "Bash", "theirs"))
+            con.execute(*ingest.incident("victim|k1", ("command", "theirs")))
+        con.close()
+        self.batch([self.incident(key="victim|k1", input="forged"), self.incident(input="mine"), self.event()])
+        ingest.run(self.cfg)
+        self.assertEqual(rows(self.db, self.INCIDENTS), [(ME, "mine") + rows(self.db, self.INCIDENTS)[0][2:],
+                                                         ("victim", "theirs", "command", 6, None, "", "", "", "", "")])
+
+    def test_an_incident_with_a_bad_value_is_a_bad_line(self):
+        bad = [dict(input_kind="body"), dict(input=7), dict(input_len=-1), dict(input_len="6"), dict(fields="{}"),
+               dict(fields='["a", 7]'), dict(fields=json.dumps(["f%d" % i for i in range(99)])),
+               dict(fields='["%s"]' % ("x" * 500)), dict(said=None), dict(cwd=["/"]), dict(branch=7),
+               dict(client="latest"), dict(call_id=None), dict(key=""), dict(input="\ud800")]
+        self.batch([self.incident(key="b%d" % n, **over) if "key" not in over else self.incident(**over)
+                    for n, over in enumerate(bad)] + [{"t": "incident", "key": "short"}])
+        stats = ingest.run(self.cfg)
+        self.assertEqual((stats["bad_lines"], rows(self.db, "select count(*) from incidents")), (len(bad) + 1, [(0,)]))
+
+    def test_an_incident_is_held_to_its_limits_whatever_the_batch_says(self):
+        self.batch([self.incident(input="x" * 99999, input_len=99999, said="y" * 99999, cwd="/" * 99999,
+                                  branch="b" * 99999, call_id="t" * 99999), self.event()])
+        ingest.run(self.cfg)
+        (got,) = rows(self.db, "select length(input), input_len, length(said), length(cwd), length(branch), "
+                               "length(call_id) from incidents")
+        held = ingest.INPUT_MAX + ingest.CUT_NOTE_MAX
+        self.assertEqual(got, (held, 99999, held, ingest.PLACE_MAX, ingest.PLACE_MAX, ingest.CODE_MAX))
 
     def usage_row(self, **over):
         u = {"t": "usage", "id": "m1", "ts": TS, "session": "s", "model": "claude-opus-5-5",

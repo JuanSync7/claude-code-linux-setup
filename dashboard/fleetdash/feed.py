@@ -33,6 +33,8 @@ create table if not exists outbox (seq integer primary key autoincrement, tbl te
                                    a text not null, b text not null);
 create trigger if not exists outbox_events after insert on events
     begin insert into outbox (tbl, a, b) values ('event', new.key, ''); end;
+create trigger if not exists outbox_incidents after insert on incidents
+    begin insert into outbox (tbl, a, b) values ('incident', new.key, ''); end;
 create trigger if not exists outbox_usage after insert on usage
     begin insert into outbox (tbl, a, b) values ('usage', new.user, new.id); end;
 create trigger if not exists outbox_sessions after insert on sessions
@@ -41,6 +43,8 @@ create trigger if not exists outbox_sessions after insert on sessions
 QUERIES = (
     ("event", "select key, ts, session, severity, category, source, tool, detail, host from events "
               "where key in (select a from outbox where tbl='event' and seq<=?)"),
+    ("incident", "select key, input, input_kind, input_len, fields, said, cwd, branch, client, call_id from incidents "
+                 "where key in (select a from outbox where tbl='incident' and seq<=?)"),
     ("usage", "select id, ts, session, model, input, output, cache_read, cache_write from usage "
               "where (user, id) in (select a, b from outbox where tbl='usage' and seq<=?)"),
     ("session", "select path, project, session, bytes, first_ts, last_ts, records from sessions "
@@ -90,7 +94,7 @@ def _send(own, spool, user):
                   "ts": me["last_seen"] if me else store.iso(datetime.datetime.utcnow()) + "Z",
                   "claude_version": me["claude_version"] if me else None,
                   "policy_sha256": me["policy_sha256"] if me else None}
-        sent = {"event": 0, "usage": 0, "session": 0}
+        sent = {kind: 0 for kind, _ in QUERIES}
         tmp = os.path.join(spool, ".tmp-%s" % secrets.token_hex(8))
         try:
             fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)

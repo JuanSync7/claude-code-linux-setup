@@ -41,11 +41,13 @@ What every path has in common:
   never counts twice. Only complete lines are read: a line still being written
   waits for its newline. A file that shrank or changed inode was rotated and is
   read again from the start under a new generation.
-- **What is kept is shape, never content**: token counts and model per API
+- **What is kept is shape, not content**: token counts and model per API
   message, and the names of slash commands, skills and plugins. Prompt text,
-  replies and command arguments are never stored; a test plants a canary in
-  each and checks the store file does not contain it. The audit hook's logged
-  commands are stored, as they are in the logs, so the store is created `0600`.
+  replies and the arguments of a slash command are never stored; a test plants
+  a canary in each and checks the store file does not contain it. There are
+  two exceptions, both commands: the audit hook's logged commands are stored,
+  as they are in the logs, and a tool call that was stopped is stored as an
+  incident (below). So the store is created `0600`.
 - **Tokens** are one row per user and API message id: streaming writes a
   message more than once and the last line wins. The user is part of the key
   because the id is whatever the transcript says, and one person copying
@@ -138,14 +140,37 @@ A transcript denial the person caused (`user-rejected`, `interrupted`) is
 
 ### What a block says, and who decided it
 
-A block read from a transcript carries three things, none of them the command:
-the kind Claude Code gives it (shown as "Decided by"), the name of the tool it
-stopped, and, where the transcript has one, the reason code (`classifier`,
-`safetyCheck`, `rule`). A name or a code is kept only when it is short and
-made of the characters names are made of, so a sentence written into either
-field is not stored. The tool's name comes from the call the block answers;
-when that call was read in an earlier run the name is not known and is left
-empty. An API error carries its status and the vendor's error code.
+A block read from a transcript carries the kind Claude Code gives it (shown as
+"Decided by"), the name of the tool it stopped, and, where the transcript has
+one, the reason code (`classifier`, `safetyCheck`, `rule`). A name or a code
+is kept only when it is short and made of the characters names are made of,
+so a sentence written into either field is not stored. An API error carries
+its status and the vendor's error code.
+
+### The record of a stopped call
+
+A block is an incident, and a line that says only "Bash, blocked" cannot be
+acted on: nobody can tell what was stopped, whether the rule was right, or
+try it again. So every block has a second row, in `incidents`, that the Logs
+page opens beneath it:
+
+| Kept | Where it comes from |
+| --- | --- |
+| What was asked for: the command, file, URL or path | The call the block answers, in the transcript; or the `detail` the `PermissionDenied` hook logged |
+| Its full length, when it was shortened | A text over the limit keeps both ends and a note of how much was left out, so padding cannot push the part that matters out of the record |
+| The names of the call's other fields | The transcript; names only |
+| What Claude was told when it was stopped | The transcript's result for that call: the rule's or the classifier's own words. The hook's log does not hold it, so a record made from that log has none |
+| The directory, git branch, Claude Code version and the call's id | The transcript's record of the block |
+| Who, when, on which host, in which chat, which tool, who decided | The block's event |
+
+What a call would have written is not kept: an edit's old and new text, a
+file's content, a prompt, the input of a tool that takes none of the four
+fields above. For those the record gives the field names and says the rest was
+not recorded. Nor are a person's words when they refused a call themselves:
+the call is kept, their message is not. The call a block answers is found by
+its id among the calls read in the same run; when it was read in an earlier
+run the record says so, and does not show an empty command. A record is
+removed when `prune` removes its event.
 
 Who decided is told apart this far:
 
@@ -335,7 +360,7 @@ dashboard does not make it.
 | Page | Shows |
 | --- | --- |
 | Overview | API-price equivalent against seats; tokens, people, blocks, hidden credentials, API errors, limit hits, chat storage, hosts; tokens by person and per day; a table of models for the subscription and another for Bedrock, each with input, output, cache-read and cache-write tokens and their cost at the configured prices; blocks by the layer that decided |
-| Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one |
+| Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one. A stopped call opens onto its record: what was asked for, what Claude was told, who decided, and where it happened |
 | Chat storage | Size by age band, by person, and the largest chats |
 | People | Everyone with use or a seat: tokens, API-price equivalent against the seat's cost, active days, last use, five-hour and weekly limit hits, and why someone looks under-used (never used, unused for `idle_days`, under `median_fraction` of the median). The table downloads as CSV, for a report |
 | Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
@@ -399,6 +424,22 @@ purpose and a test must go red.
 
 ## Known limits
 
+- A stopped call's command is stored and shown as it was written, so a
+  credential typed into a command that was then stopped is in the store, in a
+  feed batch on its way there, and on the Logs page for everyone with the
+  login. Nothing hides it: the redaction hook works on what a tool prints, not
+  on what it was asked. The same is true of the commands the audit hook logs.
+- The record of a stopped call does not say which rule matched, which
+  permission mode the session was in, or which policy the host held at that
+  moment: no transcript record has been seen to carry them. The Hosts page
+  gives the policy a host holds now. It does not say what Claude did next
+  either: whether it tried the same thing another way.
+- A block whose call was written to the transcript before an ingest and
+  answered after it has no command in its record. An ingest that starts
+  between the two is rare, and the record says the call was not read.
+- Blocks stored before this record existed have none, and the Logs page shows
+  them as before. Reading the transcripts again fills them in: remove the
+  store's checkpoints for those files, or move the store aside, and ingest.
 - The Admin page goes by what is stored, not by when it arrived: the store
   keeps no record of a feed's last delivery. A person shown as never sent
   holds an unused seat or has no working feed, and the page cannot tell which;

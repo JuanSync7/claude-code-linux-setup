@@ -143,6 +143,10 @@ def overview(cfg, days=30, now=None):
     }
 
 
+# what a stopped call's record holds beyond its event: store.py says what each is
+INCIDENT = ("input", "input_kind", "input_len", "fields", "said", "cwd", "branch", "client", "call_id")
+
+
 def events(cfg, user=None, severity=None, category=None, source=None, tool=None, limit=200, offset=0):
     if severity is not None and severity not in SEVERITIES:
         raise ValueError("unknown severity %r" % severity)
@@ -161,8 +165,9 @@ def events(cfg, user=None, severity=None, category=None, source=None, tool=None,
     con = store.connect(cfg)
     try:
         total = con.execute("select count(*) from events" + clause, args).fetchone()[0]
-        rows = con.execute("select ts, user, session, severity, category, source, tool, detail, host "
-                           "from events" + clause + " order by ts desc, key limit ? offset ?",
+        rows = con.execute("select e.key, ts, user, session, severity, category, source, tool, detail, host, "
+                           + ", ".join(INCIDENT) + ", i.key incident from events e left join incidents i "
+                           "on i.key=e.key" + clause + " order by ts desc, e.key limit ? offset ?",
                            args + [limit, offset]).fetchall()
         by_cat = con.execute("select category, count(*) n from events" + tab_clause + " group by category",
                              tab_args).fetchall()
@@ -172,7 +177,16 @@ def events(cfg, user=None, severity=None, category=None, source=None, tool=None,
     finally:
         con.close()
     present = {r["category"]: r["n"] for r in by_cat}
-    return {"total": total, "rows": [dict(r) for r in rows],
+    shown = []
+    for r in rows:
+        r = dict(r)
+        del r["key"]
+        # the fuller record of a stopped call, where one was kept: None is "not recorded", not "nothing asked"
+        kept = {col: r.pop(col) for col in INCIDENT}
+        kept["fields"] = None if kept["fields"] is None else json.loads(kept["fields"])
+        r["incident"] = kept if r["incident"] is not None else None
+        shown.append(r)
+    return {"total": total, "rows": shown,
             "by_category": [{"category": c, "count": present.get(c, 0)} for c in CATEGORIES],
             "facets": {"users": distinct["user"], "sources": distinct["source"], "tools": distinct["tool"],
                        "severities": list(SEVERITIES), "categories": list(CATEGORIES)}}

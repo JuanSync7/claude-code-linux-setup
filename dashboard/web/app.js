@@ -227,6 +227,33 @@ const DECIDED_BY = { "automode-blocked": "Claude Code safety check", "automode-u
   "permission-rule": "Permission rule", "user-rejected": "The person said no", interrupted: "The person interrupted" };
 const decidedBy = s => DECIDED_BY[s] || s;
 
+// A stopped call's record: what was asked for, why it was stopped, and where.
+// The row shows the start of it; the rest opens beneath.
+const ASKED = { command: "Command", file_path: "File", url: "URL", path: "Path", "": "Asked for" };
+function incident(e) {
+  const i = e.incident;
+  const fact = (label, ...value) => [h("dt", { text: label }), h("dd", {}, value)];
+  const cutNote = i.input !== null && i.input_len > i.input.length
+    ? h("p", { class: "muted", text: fmt.n(i.input_len) + " characters in all. The middle was left out." }) : null;
+  const asked = i.input !== null ? fact(ASKED[i.input_kind], h("pre", { class: "asked", text: i.input }), cutNote)
+    : fact("Asked for", h("span", { class: "muted", text: i.fields === null
+      ? "Not recorded. The call was not in the part of the chat read with this block."
+      : "Not recorded. Only a command, file, URL or path is kept"
+        + (i.fields.length ? "; this call had " + i.fields.join(", ") + "." : "; this call had none.") }));
+  return h("details", { class: "incident" },
+    h("summary", { text: i.input !== null ? i.input : e.detail || "What was asked for was not recorded" }),
+    h("dl", { class: "facts" }, asked,
+      i.said ? fact("Claude was told", h("pre", { class: "asked", text: i.said })) : null,
+      fact("Stopped by", decidedBy(e.source) + (i.input !== null && e.detail && e.detail !== i.input ? " (" + e.detail + ")" : "")),
+      fact("Tool", e.tool || "not recorded"),
+      i.fields && i.fields.length ? fact("The call's fields", i.fields.join(", ")) : null,
+      fact("Person", e.user), e.host ? fact("Host", e.host) : null,
+      fact("When (UTC)", fmt.ts(e.ts)),
+      i.cwd ? fact("Directory", i.cwd) : null, i.branch ? fact("Git branch", i.branch) : null,
+      i.client ? fact("Claude Code", i.client) : null,
+      e.session ? fact("Chat", e.session) : null, i.call_id ? fact("Call", i.call_id) : null));
+}
+
 async function loadLogs(append) {
   const L = state.logs;
   const q = new URLSearchParams({ limit: 200, offset: append ? L.rows.length : 0 });
@@ -260,7 +287,8 @@ async function logs(append) {
       hosted ? h("td", { class: e.host ? "" : "muted", text: e.host || "–" }) : null,
       h("td", {}, h("span", { class: "sev " + e.severity, text: e.severity })),
       h("td", { text: CAT_LABEL[e.category] || e.category }), h("td", { title: e.source, text: decidedBy(e.source) }),
-      h("td", { text: e.tool }), h("td", { class: "detail", text: e.detail }))))))
+      h("td", { text: e.tool }),
+      e.incident ? h("td", { class: "detail" }, incident(e)) : h("td", { class: "detail", text: e.detail }))))))
     : h("p", { class: "empty", text: "No events match these filters." });
   show(
     head("Logs", fmt.n(L.total) + " events"),

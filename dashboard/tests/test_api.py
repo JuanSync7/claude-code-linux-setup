@@ -205,6 +205,14 @@ class EventsAndSessions(unittest.TestCase):
         self.assertEqual([(e["user"], e["detail"]) for e in got["rows"]], [("bob", "sudo x")])
         self.assertEqual(got["total"], 1)
 
+    def test_a_stopped_call_carries_its_incident_and_no_other_event_does(self):
+        got = api.events(self.cfg)["rows"]
+        self.assertEqual([e["incident"] for e in got if e["category"] == "denial"], [
+            {"input": "sudo x", "input_kind": "", "input_len": 6, "fields": None, "said": "",
+             "cwd": "", "branch": "", "client": "", "call_id": ""}])
+        self.assertEqual({e["incident"] for e in got if e["category"] != "denial"}, {None})
+        self.assertEqual({"key" in e for e in got}, {False})
+
     def test_category_counts_ignore_the_category_filter_so_the_tabs_stay(self):
         got = api.events(self.cfg, category="denial")
         counts = {c["category"]: c["count"] for c in got["by_category"]}
@@ -331,6 +339,18 @@ class Prune(unittest.TestCase):
         self.assertEqual(removed.get("pass"), 1)
         left = sorted(e["detail"] for e in api.events(self.cfg)["rows"])
         self.assertEqual(left, ["new pass", "old deny"])
+
+    def test_an_incident_goes_when_its_event_does_and_not_before(self):
+        self.f.hooklog("denied", "alice", [
+            {"ts": "2020-08-01T10:00:00Z", "tool": "Bash", "detail": "ancient", "denied_by": "r"},
+            {"ts": "2026-10-09T10:00:00Z", "tool": "Bash", "detail": "recent", "denied_by": "r"}])
+        ingest.run(self.cfg)
+        store.prune(self.cfg, now=NOW)
+        con = store.connect(self.cfg)
+        try:
+            self.assertEqual([r[0] for r in con.execute("select input from incidents")], ["recent"])
+        finally:
+            con.close()
 
     def test_a_row_cap_keeps_the_newest(self):
         cfg = dict(self.cfg)
