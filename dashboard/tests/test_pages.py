@@ -1,4 +1,5 @@
-"""Hosts, Policy, Docs, the People report, and the one thing that is not
+"""Hosts, Policy, Docs, the People report, the Admin page's enrolment and
+retention, and the one thing that is not
 read-only: starting a configured action."""
 import datetime
 import hashlib
@@ -14,7 +15,8 @@ import urllib.request
 
 from fleetdash import actions, api, docs, ingest, server, store
 from fleetdash import config as cfgmod
-from tests.fixtures import Fleet, assistant, usage
+from fleetdash.vocab import PERSON_STATES, SEVERITIES
+from tests.fixtures import Fleet, admin_line, assistant, usage
 
 NOW = datetime.datetime(2026, 10, 10, 12)
 
@@ -510,6 +512,368 @@ class RunningActions(unittest.TestCase):
             self.assertEqual(r.headers["Content-Type"], "text/csv; charset=utf-8")
             self.assertIn("attachment", r.headers["Content-Disposition"])
             self.assertTrue(r.read().startswith(b"user,tier,tokens"))
+
+
+class Enrolment(unittest.TestCase):
+    """Who is sending data and who has stopped: per host and per person."""
+
+    def setUp(self):
+        self.f = Fleet()
+        self.cfg = cfgmod.load(self.f.config(seats=[
+            {"tier": "Max", "monthly_usd": 100.0, "users": ["alice", "dave"]}]))
+        con = store.connect(self.cfg)
+        with con:
+            for host, ts, by in (("h1", "2026-10-10T11:00:00Z", "alice"), ("h2", "2026-10-01T11:00:00Z", "bob")):
+                ingest.record_checkin(con, {"host": host, "ts": ts, "claude_version": None, "policy_sha256": None}, by)
+            usage_row = "insert into usage values (?,?,?,'s','claude-opus-5-5',1,1,0,0)"
+            con.execute(usage_row, ("m1", "2026-10-08T10:00:00Z", "alice"))
+            con.execute(usage_row, ("m2", "2026-09-01T10:00:00Z", "bob"))
+            con.execute(*ingest.event("k1", "2026-10-09T10:00:00Z", "alice", "", "pass", "tool-call", "", "Bash", "", "h1"))
+            con.execute(*ingest.event("k2", "2026-10-09T09:00:00Z", "alice", "", "pass", "tool-call", "", "Bash", "", "h2"))
+            con.execute(*ingest.event("k6", "2026-08-30T10:00:00Z", "bob", "", "pass", "tool-call", "", "Bash", "", "h1"))
+            # a transcript's event does not say which host it came from
+            con.execute(*ingest.event("k7", "2026-08-30T11:00:00Z", "bob", "", "info", "skill", "", "", "review"))
+            # a refused file is about the person, and is not data from them
+            con.execute(*ingest.event("k3", "2026-10-10T09:00:00Z", "carol", "", "error", "log-integrity",
+                                      "hard link to another file", "", "batch not read: hard link to another file"))
+            con.execute(*ingest.event("k4", "2026-10-10T10:00:00Z", "alice", "", "error", "log-integrity",
+                                      "symlink, not followed", "", "file not read: symlink, not followed"))
+            con.execute(*ingest.event("k5", "2026-10-09T08:00:00Z", "alice", "", "error", "log-integrity",
+                                      "older", "", "file not read: older"))
+        con.close()
+        self.e = api.enrolment(self.cfg, now=NOW)
+        self.people = {r["user"]: r for r in self.e["people"]}
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_a_person_is_sending_quiet_or_has_never_sent(self):
+        self.assertEqual({u: r["state"] for u, r in self.people.items()},
+                         {"alice": "sending", "bob": "quiet", "carol": "never", "dave": "never"})
+
+    def test_every_state_is_one_the_vocabulary_names(self):
+        self.assertEqual({r["state"] for r in self.e["people"]}, set(PERSON_STATES))
+
+    def test_the_last_data_is_the_newest_of_use_and_events_and_unknown_when_there_is_none(self):
+        self.assertEqual(self.people["alice"]["last_data"], "2026-10-09T10:00:00Z")
+        self.assertEqual(self.people["bob"]["last_data"], "2026-09-01T10:00:00Z")
+        self.assertIsNone(self.people["dave"]["last_data"])
+        # a file that was refused is not data from the person it names
+        self.assertIsNone(self.people["carol"]["last_data"])
+
+    def test_quiet_is_the_same_number_of_days_the_people_page_calls_idle(self):
+        self.assertEqual(self.e["idle_days"], self.cfg["under_use"]["idle_days"])
+        cfg = dict(self.cfg, under_use={"idle_days": 60, "median_fraction": 0.1})
+        self.assertEqual({r["user"]: r["state"] for r in api.enrolment(cfg, now=NOW)["people"]}["bob"], "sending")
+
+    def test_a_person_lists_the_hosts_their_events_came_from_and_their_seat(self):
+        self.assertEqual(self.people["alice"]["hosts"], ["h1", "h2"])
+        self.assertEqual(self.people["bob"]["hosts"], ["h1"])
+        self.assertEqual(self.people["carol"]["hosts"], [])
+        self.assertEqual((self.people["alice"]["seat"], self.people["bob"]["seat"]), ("Max", None))
+
+    def test_refused_files_are_counted_per_person_with_the_newest_reason(self):
+        a = self.people["alice"]
+        self.assertEqual((a["refused"], a["last_refused"]),
+                         (2, {"ts": "2026-10-10T10:00:00Z", "why": "file not read: symlink, not followed"}))
+        self.assertEqual((self.people["bob"]["refused"], self.people["bob"]["last_refused"]), (0, None))
+        self.assertEqual(self.people["carol"]["refused"], 1)
+
+    def test_a_host_is_quiet_on_the_hosts_page_rule_and_says_who_it_heard_from(self):
+        hosts = {r["host"]: r for r in self.e["hosts"]}
+        self.assertEqual({h: r["stale"] for h, r in hosts.items()}, {"h1": False, "h2": True})
+        self.assertEqual({h: r["people"] for h, r in hosts.items()}, {"h1": 2, "h2": 1})
+        self.assertEqual(hosts["h2"]["reported_by"], "bob")
+        self.assertEqual(self.e["stale_hours"], self.cfg["host_stale_hours"])
+
+    def test_an_empty_store_lists_seat_holders_as_never_and_no_host(self):
+        f = Fleet()
+        self.addCleanup(f.close)
+        e = api.enrolment(cfgmod.load(f.config()), now=NOW)
+        self.assertEqual(([(r["user"], r["state"]) for r in e["people"]], e["hosts"]), ([("alice", "never")], []))
+
+
+class Retention(unittest.TestCase):
+    """What the store keeps, and what the next prune would remove from it."""
+
+    def setUp(self):
+        self.f = Fleet()
+        cfg = cfgmod.load(self.f.config())
+        cfg["retention"] = dict(cfg["retention"], info={"days": 3650, "max_rows": 2})
+        self.cfg = cfg
+        con = store.connect(cfg)
+        with con:
+            for i, (ts, sev) in enumerate((
+                    ("2026-08-01T10:00:00Z", "pass"), ("2026-10-09T10:00:00Z", "pass"),  # 14 days: one is past
+                    ("2026-10-01T10:00:00Z", "info"), ("2026-10-02T10:00:00Z", "info"),
+                    ("2026-10-03T10:00:00Z", "info"),                                     # 2 rows: one is over
+                    ("2026-08-01T10:00:00Z", "deny"))):                                   # 365 days: kept
+                con.execute(*ingest.event("k%d" % i, ts, "alice", "", sev, "tool-call", "", "Bash", ""))
+            con.execute("insert into usage values ('m1','2026-07-01T10:00:00Z','alice','s','claude-opus-5-5',1,1,0,0)")
+        con.close()
+        self.r = api.retention(cfg, now=NOW)
+        self.rows = {r["severity"]: r for r in self.r["rows"]}
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_there_is_one_row_per_severity_with_its_rule_in_the_vocabularys_order(self):
+        self.assertEqual([r["severity"] for r in self.r["rows"]], list(SEVERITIES))
+        self.assertEqual((self.rows["pass"]["days"], self.rows["pass"]["max_rows"]), (14, 1000))
+
+    def test_a_row_says_how_many_are_stored_and_how_old_the_oldest_is(self):
+        self.assertEqual((self.rows["info"]["stored"], self.rows["info"]["oldest"]), (3, "2026-10-01T10:00:00Z"))
+        # none stored: the oldest is unknown, not a date
+        self.assertEqual((self.rows["quota"]["stored"], self.rows["quota"]["oldest"]), (0, None))
+
+    def test_what_a_prune_would_remove_is_what_a_prune_then_removes(self):
+        said = {s: r["would_remove"] for s, r in self.rows.items() if r["would_remove"]}
+        self.assertEqual(said, {"pass": 1, "info": 1})
+        self.assertEqual(store.prune(self.cfg, now=NOW), said)
+        self.assertEqual({r["would_remove"] for r in api.retention(self.cfg, now=NOW)["rows"]}, {0})
+
+    def test_a_row_both_too_old_and_over_the_cap_is_counted_once(self):
+        cfg = dict(self.cfg, retention=dict(self.cfg["retention"], info={"days": 9, "max_rows": 1}))
+        # the 1 October row is past 9 days; of the two left, one is over the cap
+        said = {r["severity"]: r["would_remove"] for r in api.retention(cfg, now=NOW)["rows"]}
+        self.assertEqual(said["info"], 2)
+        self.assertEqual(store.prune(cfg, now=NOW)["info"], 2)
+
+    def test_usage_is_kept_and_says_so(self):
+        self.assertEqual(self.r["admin_log"], {"stored": 0, "oldest": None})
+        self.assertEqual(self.r["usage"], {"stored": 1, "oldest": "2026-07-01T10:00:00Z"})
+        store.prune(self.cfg, now=NOW)
+        self.assertEqual(api.retention(self.cfg, now=NOW)["usage"]["stored"], 1)
+
+    def test_it_says_how_many_runs_are_kept(self):
+        self.assertEqual(self.r["runs"], {"keep": 20, "stored": 0})
+
+
+class AdminEndpoints(unittest.TestCase):
+    def setUp(self):
+        self.f = Fleet()
+        self.cfg = cfgmod.load(self.f.config())
+        self.httpd = server.make_server(self.cfg)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.f.close()
+
+    def get(self, path, token=None):
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.httpd.server_address[1], path),
+                                     headers={"X-Fleetdash-Token": self.httpd.token if token is None else token})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    def test_enrolment_and_retention_are_served_to_a_logged_in_page(self):
+        status, e = self.get("/api/enrolment")
+        self.assertEqual((status, sorted(e)), (200, ["hosts", "idle_days", "people", "stale_hours"]))
+        status, r = self.get("/api/retention")
+        self.assertEqual((status, sorted(r)), (200, ["admin_log", "rows", "runs", "usage"]))
+        status, a = self.get("/api/admin-sessions")
+        self.assertEqual((status, sorted(a)), (200, ["calls_kept_days", "log", "ran_shown", "refusals", "refusals_total",
+                                                     "sessions", "sessions_total"]))
+
+    def test_neither_is_served_without_the_token(self):
+        for path in ("/api/enrolment", "/api/retention", "/api/admin-sessions"):
+            self.assertEqual(self.get(path, token="wrong")[0], 403, path)
+
+
+class PrivilegedSessions(unittest.TestCase):
+    """The privileged session's own log: who started one, how it ended, who
+    was refused, and what that person ran while it was open."""
+
+    def setUp(self):
+        self.f = Fleet()
+        self.log = os.path.join(self.f.root, "log", "admin.log")
+        self.cfg = cfgmod.load(self.f.config(admin_log=self.log))
+
+    def tearDown(self):
+        self.f.close()
+
+    def read(self, lines, now=NOW, cfg=None):
+        self.f.adminlog(lines)
+        self.stats = ingest.run(cfg or self.cfg)
+        return api.admin_sessions(cfg or self.cfg, now=now)
+
+    def test_a_start_and_its_end_are_one_session(self):
+        a = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=/usr/bin/claude eval=0"),
+                       admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0")])
+        self.assertEqual(self.stats["bad_lines"], 0)
+        s, = a["sessions"]
+        self.assertEqual({k: s[k] for k in ("host", "invoker", "target", "tty", "started", "ended", "seconds", "rc")},
+                         {"host": "test-host", "invoker": "alice", "target": "alice", "tty": "/dev/pts/2",
+                          "started": "2026-10-10T10:00:00Z", "ended": "2026-10-10T10:30:00Z", "seconds": 1800,
+                          "rc": 0})
+        self.assertEqual(a["refusals"], [])
+
+    def test_a_start_with_no_end_has_no_end_and_no_exit_code_not_zero(self):
+        a = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=/usr/bin/claude eval=0")])
+        s, = a["sessions"]
+        self.assertEqual((s["ended"], s["seconds"], s["rc"]), (None, None, None))
+
+    def test_a_process_number_used_again_starts_a_second_session(self):
+        a = self.read([admin_line("2026-10-08T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                       admin_line("2026-10-09T10:00:00Z", 100, "bob", "admin session START bin=c eval=0"),
+                       admin_line("2026-10-09T10:05:00Z", 100, "bob", "admin session END rc=3")])
+        # newest first
+        self.assertEqual([(s["invoker"], s["ended"], s["rc"]) for s in a["sessions"]],
+                         [("bob", "2026-10-09T10:05:00Z", 3), ("alice", None, None)])
+
+    def test_a_second_end_for_a_process_number_does_not_reopen_the_session_it_ended(self):
+        a = self.read([admin_line("2026-10-08T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                       admin_line("2026-10-08T10:05:00Z", 100, "alice", "admin session END rc=0"),
+                       admin_line("2026-10-09T10:00:00Z", 100, "bob", "admin session END rc=4")])
+        self.assertEqual([(s["invoker"], s["started"], s["ended"], s["rc"]) for s in a["sessions"]],
+                         [("bob", None, "2026-10-09T10:00:00Z", 4),
+                          ("alice", "2026-10-08T10:00:00Z", "2026-10-08T10:05:00Z", 0)])
+
+    def test_two_sessions_one_person_has_open_at_once_each_keep_their_own_end(self):
+        a = self.read([admin_line("2026-10-08T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                       admin_line("2026-10-08T11:00:00Z", 200, "alice", "admin session START bin=c eval=0"),
+                       admin_line("2026-10-08T12:00:00Z", 100, "alice", "admin session END rc=1"),
+                       admin_line("2026-10-10T11:00:01Z", 200, "alice", "admin session END rc=2")])
+        # the second one ran for more than a day: its length is all of it, not the part past midnight
+        self.assertEqual([(s["started"], s["seconds"], s["rc"]) for s in a["sessions"]],
+                         [("2026-10-08T11:00:00Z", 2 * 86400 + 1, 2), ("2026-10-08T10:00:00Z", 7200, 1)])
+
+    def test_two_lines_stamped_in_the_same_second_are_both_kept(self):
+        a = self.read([admin_line("2026-10-10T09:00:00Z", 7, "alice", "REFUSED reason=uid0"),
+                       admin_line("2026-10-10T09:00:00Z", 7, "alice", "REFUSED reason=uid0")])
+        self.assertEqual(len(a["refusals"]), 2)
+
+    def test_what_ran_is_looked_up_under_the_account_the_session_ran_as(self):
+        self.f.hooklog("activity", "svc", [{"ts": "2026-10-10T10:01:00Z", "tool": "Bash", "detail": "as the target"}])
+        self.f.hooklog("activity", "alice", [{"ts": "2026-10-10T10:02:00Z", "tool": "Bash", "detail": "as the invoker"}])
+        s, = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0", target="svc"),
+                        admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0", target="svc")])["sessions"]
+        self.assertEqual([c["detail"] for c in s["ran"]], ["as the target"])
+
+    def test_an_end_whose_start_was_never_read_has_no_start(self):
+        a = self.read([admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0")])
+        s, = a["sessions"]
+        self.assertEqual((s["started"], s["ended"], s["seconds"], s["rc"]), (None, "2026-10-10T10:30:00Z", None, 0))
+
+    def test_a_refusal_is_listed_with_its_reason_and_is_not_a_session(self):
+        a = self.read([
+            admin_line("2026-10-10T09:00:00Z", 7, "mallory", "REFUSED reason=unauthorised group=wheel", target="unset"),
+            admin_line("2026-10-10T09:01:00Z", 8, "alice", "REFUSED reason=uid0", target="root", tty="none"),
+            admin_line("2026-10-10T09:02:00Z", 9, "alice", "REFUSED reason=die msg=policy file is missing")])
+        self.assertEqual(a["sessions"], [])
+        self.assertEqual([(r["ts"], r["invoker"], r["target"], r["tty"], r["reason"], r["detail"]) for r in a["refusals"]], [
+            ("2026-10-10T09:02:00Z", "alice", "alice", "/dev/pts/2", "die", "msg=policy file is missing"),
+            ("2026-10-10T09:01:00Z", "alice", "root", "none", "uid0", ""),
+            ("2026-10-10T09:00:00Z", "mallory", "unset", "/dev/pts/2", "unauthorised", "group=wheel")])
+
+    def test_a_line_that_is_not_the_launchers_shape_is_a_bad_line_and_stores_nothing(self):
+        good = admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")
+        bad = ["garbage",
+               "2026-10-10T10:00:00Z pid=x invoker=alice target=alice tty=none admin session START",
+               "2026-10-10T10:00:00Z invoker=alice pid=1 target=alice tty=none admin session START",
+               "yesterday pid=1 invoker=alice target=alice tty=none admin session START",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none something else happened",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none admin session END rc=zero",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none REFUSED because",
+               "2026-10-10T10:00:00Z pid=1 user=alice target=alice tty=none admin session START",
+               " pid=1 invoker=alice target=alice tty=none admin session START",  # no time at all
+               "2026-10-10T10:00:00Z pid=1 invoker= target=alice tty=none admin session START",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none admin session END rc=0 and more",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none admin session END rc=-1",
+               "2026-10-10T10:00:00Z pid=+1 invoker=alice target=alice tty=none admin session START",
+               "2026-10-10T10:00:00Z pid=1 invoker=alice target=alice tty=none"]
+        a = self.read(bad + [good])
+        self.assertEqual((self.stats["bad_lines"], len(a["sessions"]), a["refusals"]), (len(bad), 1, []))
+
+    def test_a_second_ingest_adds_nothing_and_an_appended_line_adds_one(self):
+        self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")])
+        self.assertEqual(len(self.read([])["sessions"]), 1)
+        a = self.read([admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0")])
+        self.assertEqual([(s["started"], s["ended"]) for s in a["sessions"]],
+                         [("2026-10-10T10:00:00Z", "2026-10-10T10:30:00Z")])
+
+    def test_a_session_counts_what_that_person_ran_on_that_host_while_it_was_open(self):
+        call = lambda ts, detail: {"ts": ts, "tool": "Bash", "detail": detail}
+        self.f.hooklog("activity", "alice", [call("2026-10-10T09:59:00Z", "before"), call("2026-10-10T10:01:00Z", "dnf install x"),
+                                             call("2026-10-10T10:02:00Z", "systemctl restart y"),
+                                             call("2026-10-10T10:31:00Z", "after")])
+        self.f.hooklog("activity", "bob", [call("2026-10-10T10:03:00Z", "someone else")])
+        self.f.hooklog("denied", "alice", [dict(call("2026-10-10T10:04:00Z", "rm -rf /"), denied_by="rule")])
+        s, = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                        admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0")])["sessions"]
+        self.assertEqual((s["calls"], s["blocked"]), (2, 1))
+        self.assertEqual([(c["severity"], c["tool"], c["detail"]) for c in s["ran"]],
+                         [("pass", "Bash", "dnf install x"), ("pass", "Bash", "systemctl restart y"),
+                          ("deny", "Bash", "rm -rf /")])
+
+    def test_what_a_session_ran_is_unknown_with_no_end_or_once_tool_calls_that_old_are_pruned(self):
+        a = self.read([admin_line("2026-08-01T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                       admin_line("2026-08-01T10:30:00Z", 100, "alice", "admin session END rc=0"),
+                       admin_line("2026-10-10T10:00:00Z", 101, "alice", "admin session START bin=c eval=0")])
+        # passes are kept 14 days: none stored is then not the same as none run
+        self.assertEqual([(s["calls"], s["blocked"], s["ran"]) for s in a["sessions"]], [(None, None, None)] * 2)
+
+    def test_only_the_newest_calls_shown_are_capped_and_the_count_is_not(self):
+        n = api.ADMIN_RAN_SHOWN + 5
+        self.f.hooklog("activity", "alice", [{"ts": "2026-10-10T10:%02d:%02dZ" % divmod(i, 60), "tool": "Bash", "detail": "c%d" % i}
+                                             for i in range(1, n + 1)])
+        s, = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0"),
+                        admin_line("2026-10-10T10:30:00Z", 100, "alice", "admin session END rc=0")])["sessions"]
+        self.assertEqual((s["calls"], len(s["ran"]), s["ran"][0]["detail"]), (n, api.ADMIN_RAN_SHOWN, "c1"))
+
+    def test_the_log_says_whether_it_is_configured_there_and_readable(self):
+        self.assertEqual(api.admin_sessions(dict(self.cfg, admin_log=""), now=NOW)["log"],
+                         {"path": "", "state": "not-configured", "at": None, "error": None})
+        # configured, and no ingest has looked yet
+        self.assertEqual(api.admin_sessions(self.cfg, now=NOW)["log"]["state"], "not-read-yet")
+        # no file: a host where no privileged session was ever started. Not an error.
+        stats = ingest.run(self.cfg)
+        log = api.admin_sessions(self.cfg, now=NOW)["log"]
+        self.assertEqual((stats["skipped"], log["state"], log["error"]), ([], "absent", None))
+        self.assertIsNotNone(log["at"])
+        self.f.adminlog([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")])
+        ingest.run(self.cfg)
+        self.assertEqual(api.admin_sessions(self.cfg, now=NOW)["log"]["state"], "read")
+
+    def test_a_log_that_cannot_be_opened_is_said_on_the_page_and_in_the_exit_status(self):
+        blocker = os.path.join(self.f.root, "a-file")
+        open(blocker, "w").close()
+        cfg = dict(self.cfg, admin_log=os.path.join(blocker, "admin.log"))
+        stats = ingest.run(cfg)
+        log = api.admin_sessions(cfg, now=NOW)["log"]
+        self.assertEqual((len(stats["skipped"]), log["state"]), (1, "unreadable"))
+        self.assertIn("Not a directory", log["error"])
+        # and once it can be read, the error is gone
+        ingest.run(self.cfg)
+        self.assertIsNone(api.admin_sessions(self.cfg, now=NOW)["log"]["error"])
+
+    def test_with_owners_checked_a_log_root_does_not_own_is_refused(self):
+        cfg = dict(self.cfg, verify_file_owner=True)
+        a = self.read([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")], cfg=cfg)
+        if os.geteuid() == 0:  # the CI container: root wrote the fixture, as the launcher would
+            self.assertEqual((len(a["sessions"]), a["log"]["state"]), (1, "read"))
+        else:
+            self.assertEqual((a["sessions"], a["log"]["state"]), ([], "unreadable"))
+            self.assertIn("owner ", a["log"]["error"])
+
+    def test_no_admin_log_configured_reads_none_and_skips_nothing(self):
+        cfg = dict(self.cfg, admin_log="")
+        self.f.adminlog([admin_line("2026-10-10T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")])
+        self.assertEqual((ingest.run(cfg)["skipped"], api.admin_sessions(cfg, now=NOW)["sessions"]), ([], []))
+
+    def test_a_path_that_is_not_absolute_is_refused_at_start_up(self):
+        with self.assertRaises(cfgmod.ConfigError):
+            cfgmod.load(self.f.config(admin_log="log/admin.log"))
+
+    def test_the_log_is_kept_whole_and_retention_says_so(self):
+        self.read([admin_line("2026-01-01T10:00:00Z", 100, "alice", "admin session START bin=c eval=0")])
+        store.prune(self.cfg, now=NOW)
+        self.assertEqual(api.retention(self.cfg, now=NOW)["admin_log"], {"stored": 1, "oldest": "2026-01-01T10:00:00Z"})
 
 
 class LoginToken(unittest.TestCase):

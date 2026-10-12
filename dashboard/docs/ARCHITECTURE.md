@@ -249,6 +249,12 @@ or stopping the run for everyone:
   sticky and world-writable, so anyone can create `<victim>.jsonl`;
 - a file refused for any of these reasons becomes a `log-integrity` event under
   the user it claims to be for, and is listed as skipped;
+- the privileged session's log (`admin_log`) is read under the same rules and,
+  with `verify_file_owner` on, must be root's. Each line is split by position
+  into its time, the four named fields and one of the three messages the
+  launcher writes; a line of any other shape is a bad line. Whether the file
+  was read, was not there, or could not be read is stored beside the lines, so
+  the page can tell no sessions from a log it never saw;
 - a record that cannot be read writes nothing, is counted in `bad_lines`, and
   ingest goes on. A field of the wrong JSON type is stored as text. What
   makes a record bad: a token count that is not a whole number from 0 to a
@@ -335,6 +341,7 @@ dashboard does not make it.
 | Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
 | Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets |
 | Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
+| Admin | Who used the privileged session: each start with its end, how long it lasted and its exit code, each refusal with its reason, and the tool calls and blocks logged for that account on that host between the start and the end. Who is sending data: each person as sending, quiet (nothing newer than `idle_days`) or never sent, the hosts their events came from, and the files of theirs that were refused; each host and when it was last heard. How long logs are kept: each result's age limit and row cap, how many rows it holds, and how many the next `prune` would remove. Read-only |
 | Docs | The Markdown documents under the directories the config lists, rendered in the page. A link to another listed document opens it; any other relative link stays text |
 
 Docs are rendered by a small reader in `web/app.js` that covers headings,
@@ -359,7 +366,8 @@ Pages that are not built, and what each needs first:
 
 | Page | Needs first |
 | --- | --- |
-| Admin | The `claude-admin` privileged session: who holds it, when it was used, what it changed. Needs that session's audit log to reach the collector |
+| Admin: the privileged session on other hosts | The page reads the session log of the host the dashboard runs on. Another host's log would have to reach the collector, and `feed` cannot carry it: it runs as each person, and the log is root's |
+| Admin: changing retention | The page shows the rules and does not change them: they are in the config file, which the server only reads |
 | Skills and connectors | A shared catalogue people can install from, and a way to offer a set by role. Needs a decision on where the catalogue lives and who approves an entry; connectors are disabled by the policy today |
 | Editing the policy | The Policy page only reads. A change stays a merge request and a deploy until a review decides who may make one from a page |
 | Telemetry | Claude Code's OpenTelemetry export needs a collector, and its interaction with `DISABLE_TELEMETRY` measured first |
@@ -391,6 +399,23 @@ purpose and a test must go red.
 
 ## Known limits
 
+- The Admin page goes by what is stored, not by when it arrived: the store
+  keeps no record of a feed's last delivery. A person shown as never sent
+  holds an unused seat or has no working feed, and the page cannot tell which;
+  a person on leave and a feed that broke both show as quiet. It does not
+  record when `prune` last ran either, only what the next run would remove.
+- The privileged session's log is written root-only, because it says who held
+  privilege. The dashboard's account can read it only if the site gives that
+  account access, which is a change to the control plane and not something
+  the installer does; until then the Admin page says the log could not be
+  read. Everyone who has the login token sees what the page shows.
+- The session's log does not say what a session did. The page shows the tool
+  calls and blocks logged for that account on that host between the start and
+  the end, which includes any ordinary session the same person had open then,
+  and shows nothing once those rows are past their retention. A start whose
+  end was never written cannot be told from a session still open.
+- Lines of the session's log are never pruned. A line written after the last
+  ingest and before the log is rotated is not read.
 - The figures are self-reported, by direct ingest and by feed alike: see
   "What the figures can be trusted for".
 - Put `store` on local disk. Ingest commits once per file, and each commit

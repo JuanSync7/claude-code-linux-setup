@@ -14,7 +14,8 @@ of the slash command, skill or plugin, never the text of a message or the
 arguments of a command.
 
 A run also records this host's check-in (its Claude Code version and the hash
-of the policy it holds), and reads the feed spool when one is configured.
+of the policy it holds), and reads the feed spool and the privileged
+session's log when the config names them.
 """
 import collections
 import datetime
@@ -30,6 +31,7 @@ import string
 import subprocess
 
 from fleetdash import store
+from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES
 
 CHUNK = 8 << 20
 # no real record comes near this; a longer line is a bad record, not a buffer
@@ -74,6 +76,8 @@ def run(cfg, own=None):
     try:
         for path, user, cp, reader in _sources(cfg, own, stats):
             _file(con, cfg, path, user, reader, stats, cp)
+        if cfg["admin_log"] and own is None:
+            _admin_log(con, cfg, stats)
         if cfg["spool"] and own is None:
             from fleetdash import spool  # spool builds its rows with this module's helpers
             spool.collect(con, cfg, stats)
@@ -220,10 +224,7 @@ def _file(con, cfg, path, user, reader, stats, cp_key):
                 try:
                     if raw is None:
                         raise ValueError("line longer than %d bytes" % LINE_MAX)
-                    rec = json.loads(raw.decode("utf-8"))
-                    if not isinstance(rec, dict):
-                        raise ValueError("not an object")
-                    rows = reader.take(rec, "%s|%d|%d" % (cp_key, gen, line_at))
+                    rows = reader.take(reader.parse(raw), "%s|%d|%d" % (cp_key, gen, line_at))
                 except BAD_RECORD:
                     stats["bad_lines"] += 1
                     continue
@@ -335,10 +336,19 @@ def _hash(s):
     return hashlib.sha1(s.encode("utf-8", "surrogateescape")).hexdigest()
 
 
+def json_record(raw):
+    rec = json.loads(raw.decode("utf-8"))
+    if not isinstance(rec, dict):
+        raise ValueError("not an object")
+    return rec
+
+
 class _hook_reader(object):
     """One JSON line per tool call (activity), refusal (denied) or redaction.
     The user is the one the file is named for, not a field in the line, and
     the host is the one reading it: the hooks write only to their own host."""
+
+    parse = staticmethod(json_record)
 
     def __init__(self, kind, user, host):
         self.kind, self.user, self.host = kind, user, host
@@ -363,6 +373,95 @@ class _hook_reader(object):
                        self.host)]
 
 
+# The launcher's line: a time, these four as name=value in this order, then
+# the message. It writes each as one word with no space in it.
+ADMIN_FIELDS = ("pid", "invoker", "target", "tty")
+ADMIN_START = ("admin", "session", "START")
+ADMIN_END = ("admin", "session", "END")
+ADMIN_REFUSED = "REFUSED"
+EXIT_CODE_RE = re.compile(r"[0-9]{1,3}")
+PID_RE = re.compile(r"[0-9]{1,10}")
+
+
+def _named(word, name):
+    """The value of one name=value word, which must be the one expected."""
+    key, eq, value = word.partition("=")
+    if key != name or not eq or not value:
+        raise ValueError("expected %s=..." % name)
+    return value
+
+
+class _admin_reader(object):
+    """One line per privileged session started, ended or refused, as
+    bin/cc-admin-session.sh stamps it. A line of any other shape is a bad
+    line: nothing is guessed from it."""
+
+    def __init__(self, host):
+        self.host = host
+
+    def restart(self, con):
+        pass  # a rotated log's lines are history: they stay
+
+    def finish(self, con, st):
+        pass
+
+    @staticmethod
+    def parse(raw):
+        words = raw.decode("utf-8").rstrip("\n").split(" ")
+        if len(words) < 2 + len(ADMIN_FIELDS):
+            raise ValueError("too short")
+        rec = {"ts": words[0]}
+        for name, word in zip(ADMIN_FIELDS, words[1:]):
+            rec[name] = _named(word, name)
+        if not PID_RE.fullmatch(rec["pid"]):
+            raise ValueError("pid is not a number")
+        said = words[1 + len(ADMIN_FIELDS):]
+        start, end, refused = ADMIN_KINDS
+        rec.update(reason="", rc=None)
+        if tuple(said[:3]) == ADMIN_START:
+            rec.update(kind=start, detail=" ".join(said[3:]))
+        elif tuple(said[:3]) == ADMIN_END and len(said) == 4:
+            code = _named(said[3], "rc")
+            if not EXIT_CODE_RE.fullmatch(code):
+                raise ValueError("exit code is not a number")
+            rec.update(kind=end, rc=int(code), detail="")
+        elif said[0] == ADMIN_REFUSED and len(said) > 1:
+            rec.update(kind=refused, reason=_named(said[1], "reason"), detail=" ".join(said[2:]))
+        else:
+            raise ValueError("not a start, an end or a refusal")
+        return rec
+
+    def take(self, rec, key):
+        ts = timestamp(rec["ts"])
+        if not ts:
+            raise ValueError("no time")
+        return [("insert or ignore into admin_log values (?,?,?,?,?,?,?,?,?,?,?)", (
+            _hash(key), self.host, ts, int(rec["pid"]), text(rec["invoker"]), text(rec["target"]),
+            text(rec["tty"]), rec["kind"], text(rec["reason"]), rec["rc"], text(rec["detail"])[:DETAIL_MAX]))]
+
+
+def _admin_log(con, cfg, stats):
+    """Read the privileged session's log and record what was found there, so
+    the page can tell no sessions from a log that was never read. Only root
+    writes that file, so with owners checked it must be root's."""
+    path, host = cfg["admin_log"], cfg["host_label"]
+    _unset, _unread, absent, unreadable, state = ADMIN_LOG_STATES
+    before = len(stats["skipped"])
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        state = absent
+    except OSError:
+        pass  # anything else is said by the open below
+    if state != absent:
+        _file(con, cfg, path, owner(0), _admin_reader(host), stats, "%s:%s" % (host, path))
+    why = stats["skipped"][before:]
+    with con:
+        con.execute("insert or replace into meta values ('admin_log', ?)", (json.dumps({
+            "state": unreadable if why else state, "error": why[0][1] if why else None,
+            "at": store.iso(datetime.datetime.utcnow()) + "Z"}),))
+
+
 def model_label(model):
     """A Bedrock inference-profile ARN carries an AWS account id; keep only
     the fact that it is one."""
@@ -379,6 +478,8 @@ def _code(v, chars=CODE_CHARS):
 
 
 class _transcript_reader(object):
+    parse = staticmethod(json_record)
+
     def __init__(self, path, user, project):
         self.path, self.user, self.project = path, user, project
         self.session = os.path.basename(path)[:-len(".jsonl")]

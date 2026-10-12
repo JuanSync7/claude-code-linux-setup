@@ -10,7 +10,7 @@ import json
 import re
 
 from fleetdash import ingest, store
-from fleetdash.vocab import CATEGORIES, NOT_A_MODEL, PROVIDERS, SEVERITIES
+from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES, CATEGORIES, NOT_A_MODEL, PERSON_STATES, PROVIDERS, SEVERITIES
 
 MONTH_DAYS = 30.0
 TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
@@ -354,6 +354,153 @@ def hosts(cfg, days=30, now=None):
                     "events": {s: c.get(s, 0) for s in SEVERITIES}})
     return {"days": days, "stale_hours": cfg["host_stale_hours"], "expected_policy_sha256": expected,
             "newest_version": newest, "rows": out}
+
+
+def enrolment(cfg, now=None):
+    """Who is sending data and who has stopped. A host is quiet on the Hosts
+    page's rule. A person is quiet when their newest stored use or event is
+    older than the People page's idle rule, and has never sent when there is
+    none: a seat nobody uses and a feed that is not set up look the same from
+    here. A file that was refused is counted against the person it names and
+    is not data from them."""
+    stale_before = _stale_before(cfg, now)
+    idle_before = store.iso(_now(now) - datetime.timedelta(days=cfg["under_use"]["idle_days"]))
+    con = store.connect(cfg)
+    try:
+        hosts = con.execute("select host, last_seen, reported_by from hosts order by host").fetchall()
+        last = {}
+        for r in con.execute("select user, max(ts) t from usage group by user union all "
+                             "select user, max(ts) t from events where category!='log-integrity' group by user"):
+            last[r["user"]] = max(last.get(r["user"], ""), r["t"])
+        seen = {}
+        for r in con.execute("select distinct user, host from events where host!='' and category!='log-integrity' "
+                             "order by host"):
+            seen.setdefault(r["user"], []).append(r["host"])
+        refused = {}
+        # newest first, so the first row kept for a person is their latest
+        for r in con.execute("select user, ts, detail from events where category='log-integrity' "
+                             "order by ts desc, key"):
+            p = refused.setdefault(r["user"], {"n": 0, "last": {"ts": r["ts"], "why": r["detail"]}})
+            p["n"] += 1
+    finally:
+        con.close()
+    seat = {}
+    for row in cfg["seats"]:
+        for u in row["users"]:
+            seat.setdefault(u, row["tier"])
+    heard = {}
+    for hs in seen.values():
+        for host in hs:
+            heard[host] = heard.get(host, 0) + 1
+    people = []
+    for user in sorted(set(last) | set(refused) | set(seat)):
+        t = last.get(user)
+        sending, quiet, never = PERSON_STATES
+        state = never if t is None else quiet if t[:19] < idle_before else sending
+        people.append({"user": user, "seat": seat.get(user), "state": state, "last_data": t,
+                       "hosts": seen.get(user, []), "refused": refused.get(user, {"n": 0})["n"],
+                       "last_refused": refused[user]["last"] if user in refused else None})
+    return {"stale_hours": cfg["host_stale_hours"], "idle_days": cfg["under_use"]["idle_days"],
+            "hosts": [{"host": r["host"], "last_seen": r["last_seen"], "stale": r["last_seen"][:19] < stale_before,
+                       "reported_by": r["reported_by"], "people": heard.get(r["host"], 0)} for r in hosts],
+            "people": people}
+
+
+# how many sessions and refusals the page is given, newest first, and how many
+# of one session's tool calls
+ADMIN_ROWS_SHOWN = 100
+ADMIN_RAN_SHOWN = 50
+
+
+def _admin_log_state(cfg, con):
+    not_configured, not_read_yet = ADMIN_LOG_STATES[:2]
+    found = {"state": not_configured if not cfg["admin_log"] else not_read_yet, "at": None, "error": None}
+    if cfg["admin_log"]:
+        row = con.execute("select v from meta where k='admin_log'").fetchone()
+        if row:
+            found = json.loads(row["v"])
+    return dict(found, path=cfg["admin_log"])
+
+
+def admin_sessions(cfg, now=None):
+    """The privileged session's log as sessions: each start with the end
+    that shares its host and process number, and each refusal. A start with
+    no end is still open or its end was never written, and the log cannot say
+    which; an end with no start was started before the log was first read.
+
+    What a session ran is not in that log. It is counted from the tool calls
+    and blocks the hooks logged for that account on that host between the
+    start and the end, so an ordinary session the same person had open then
+    is counted too. It is unknown (None), not zero, without both ends, or
+    once tool calls that old are past their retention."""
+    start, end, refused = ADMIN_KINDS
+    kept_since = _since(now, cfg["retention"]["pass"]["days"])
+    con = store.connect(cfg)
+    try:
+        log = _admin_log_state(cfg, con)
+        sessions, refusals, open_ = [], [], {}
+        for r in con.execute("select * from admin_log order by ts, rowid"):
+            who = {"host": r["host"], "invoker": r["invoker"], "target": r["target"], "tty": r["tty"]}
+            at = (r["host"], r["pid"])
+            if r["kind"] == refused:
+                refusals.append(dict(who, ts=r["ts"], reason=r["reason"], detail=r["detail"]))
+            elif r["kind"] == start:
+                # the same process number starting again: the one before never wrote its end
+                open_[at] = dict(who, started=r["ts"], ended=None, seconds=None, rc=None)
+                sessions.append(open_[at])
+            elif r["kind"] == end:
+                s = open_.pop(at, None)
+                if s is None:
+                    s = dict(who, started=None, seconds=None)
+                    sessions.append(s)
+                else:
+                    s["seconds"] = int((datetime.datetime.strptime(r["ts"][:19], store.ISO)
+                                        - datetime.datetime.strptime(s["started"][:19], store.ISO)).total_seconds())
+                s.update(ended=r["ts"], rc=r["rc"])
+        sessions.sort(key=lambda s: (s["started"] or s["ended"])[:19], reverse=True)
+        refusals.reverse()
+        shown = sessions[:ADMIN_ROWS_SHOWN]
+        for s in shown:
+            s.update(calls=None, blocked=None, ran=None)
+            if s["started"] is None or s["ended"] is None or s["ended"][:19] < kept_since:
+                continue
+            window = (s["target"], s["host"], s["started"][:19], s["ended"][:19])
+            where = ("from events where user=? and host=? and ts>=? and substr(ts,1,19)<=? "
+                     "and category in ('tool-call','denial')")
+            n = {r["category"]: r["n"] for r in con.execute(
+                "select category, count(*) n %s group by category" % where, window)}
+            s.update(calls=n.get("tool-call", 0), blocked=n.get("denial", 0), ran=[
+                {"ts": r["ts"], "severity": r["severity"], "tool": r["tool"], "detail": r["detail"]}
+                for r in con.execute("select ts, severity, tool, detail %s order by ts, key limit ?" % where,
+                                     window + (ADMIN_RAN_SHOWN,))])
+    finally:
+        con.close()
+    return {"log": log, "sessions": shown, "sessions_total": len(sessions),
+            "refusals": refusals[:ADMIN_ROWS_SHOWN], "refusals_total": len(refusals),
+            "ran_shown": ADMIN_RAN_SHOWN, "calls_kept_days": cfg["retention"]["pass"]["days"]}
+
+
+def retention(cfg, now=None):
+    """What the store keeps and for how long: each severity's rule, how many
+    events it holds, and how many the next prune would remove. Usage rows and
+    the privileged session's log are never pruned; the Update page's runs are
+    kept by count."""
+    con = store.connect(cfg)
+    try:
+        held = {r["severity"]: r for r in con.execute(
+            "select severity, count(*) n, min(ts) oldest from events group by severity")}
+        would = store.prunable(con, cfg, now=_now(now))
+        usage = con.execute("select count(*) n, min(ts) oldest from usage").fetchone()
+        runs = con.execute("select count(*) from runs").fetchone()[0]
+        admin = con.execute("select count(*) n, min(ts) oldest from admin_log").fetchone()
+    finally:
+        con.close()
+    return {"rows": [{"severity": s, "days": cfg["retention"][s]["days"], "max_rows": cfg["retention"][s]["max_rows"],
+                      "stored": held[s]["n"] if s in held else 0, "oldest": held[s]["oldest"] if s in held else None,
+                      "would_remove": would[s]} for s in SEVERITIES],
+            "usage": {"stored": usage["n"], "oldest": usage["oldest"]},
+            "admin_log": {"stored": admin["n"], "oldest": admin["oldest"]},
+            "runs": {"keep": cfg["runs"]["keep"], "stored": runs}}
 
 
 RULE_KINDS = ("deny", "ask", "allow")

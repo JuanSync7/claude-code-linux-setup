@@ -25,6 +25,11 @@ def usage(i=10, o=20, cr=300, cw=40):
             "cache_creation_input_tokens": cw}
 
 
+def admin_line(ts, pid, who, message, target=None, tty="/dev/pts/2"):
+    """One line as the privileged session's launcher stamps it."""
+    return "%s pid=%d invoker=%s target=%s tty=%s %s" % (ts, pid, who, target or who, tty, message)
+
+
 class Fleet(object):
     """A temporary tree laid out like a host: <root>/home/<user>/.claude/projects
     and <root>/log/{activity,denied}/<user>.jsonl."""
@@ -54,6 +59,17 @@ class Fleet(object):
                 f.write(json.dumps(r) + "\n")
         return path
 
+    def adminlog(self, lines):
+        """Append lines to <root>/log/admin.log, the privileged session's own
+        log; returns its path. See admin_line()."""
+        d = os.path.join(self.root, "log")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "admin.log")
+        with open(path, "a") as f:
+            for line in lines:
+                f.write(line + "\n")
+        return path
+
     def config(self, **over):
         cfg = {
             "store": self.store,
@@ -63,6 +79,7 @@ class Fleet(object):
             "transcript_glob": os.path.join(self.root, "home", "*", ".claude", "projects"),
             "user_from_path": "/home/([^/]+)/",
             "hook_log_dir": os.path.join(self.root, "log"),
+            "admin_log": "",
             "spool": "",
             "feed": {"transcripts": os.path.join(self.root, "home", "nobody", ".claude", "projects"),
                      "state_dir": os.path.join(self.root, "feed-state")},

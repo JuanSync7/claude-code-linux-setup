@@ -41,6 +41,12 @@ const fmt = {
   ts: t => t ? t.replace("T", " ").slice(0, 16) : "–",
   days: d => d === null || d === undefined ? "–" : d === 0 ? "today" : d === 1 ? "1 day" : d + " days",
   // a clock a little ahead of this one puts a moment in the future: that is still today
+  dur(s) {
+    if (s === null || s === undefined) return "–";
+    if (s < 60) return s + " s";
+    const m = Math.round(s / 60);
+    return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min";
+  },
   ago: d => d === null || d === undefined ? "–" : d <= 0 ? "today" : d === 1 ? "yesterday" : d + " days ago",
 };
 
@@ -372,6 +378,115 @@ async function hosts() {
     figs, h("section", {}, h("p", { class: "muted", text: rule }), table));
 }
 
+// Admin ----------------------------------------------------------------------
+const PERSON_STATE = { sending: ["pass", "sending"], quiet: ["error", "quiet"], never: ["info", "never sent"] };
+// What each kind of log line is, for someone who has not read the Logs page.
+const KEPT_AS = { pass: "Tool calls that were let through", info: "Slash commands, skills and plugins",
+  deny: "Blocked tool calls", redact: "Hidden credentials", quota: "Limit hits", error: "Errors and refused files" };
+const REFUSED_FOR = { unauthorised: "not in the admin group", uid0: "started as root", impersonation: "started for another account",
+  die: "the launcher stopped before starting" };
+function sessionLog(log) {
+  const at = fmt.ts(log.at) + " UTC";
+  if (log.state === "not-configured") return "No session log is set: admin_log in the config file is empty, so this section has nothing to read.";
+  if (log.state === "not-read-yet") return "The log at " + log.path + " has not been read yet. It is read each time logs are collected.";
+  if (log.state === "absent") return "There was no file at " + log.path + " at " + at + ": the privileged session has not been started on this host, or its log is elsewhere.";
+  if (log.state === "unreadable") return log.path + " could not be read at " + at + ": " + log.error + ". What is below is what was read before.";
+  return "Read from " + log.path + ", last at " + at + ".";
+}
+function privileged(a) {
+  const who = s => s.invoker === s.target ? s.invoker : s.invoker + " as " + s.target;
+  const more = (shown, total, what) => total > shown
+    ? h("p", { class: "muted", text: "The newest " + fmt.n(shown) + " of " + fmt.n(total) + " " + what + "." }) : null;
+  const ran = s => s.ran === null ? h("span", { class: "muted", text: !s.started || !s.ended ? "unknown without both ends" : "no longer kept" })
+    : !s.ran.length ? h("span", { class: "muted", text: "nothing logged" })
+    : h("details", {}, h("summary", { text: fmt.n(s.calls) + (s.calls === 1 ? " tool call, " : " tool calls, ") + fmt.n(s.blocked) + " blocked" }),
+        h("ul", { class: "ran" }, s.ran.map(x => h("li", {}, h("span", { class: "ts", text: fmt.ts(x.ts).slice(11) }),
+          h("span", { class: "sev " + x.severity, text: x.severity }), h("b", { text: x.tool || "–" }), h("span", { class: "cmd", text: x.detail || "" })))),
+        s.calls + s.blocked > s.ran.length ? h("p", { class: "muted", text: "The first " + fmt.n(s.ran.length) + "; the Logs page has the rest." }) : null);
+  const sessions = a.sessions.length ? [h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "Started (UTC)" }), h("th", { text: "Who" }), h("th", { text: "Host" }), h("th", { text: "Terminal" }),
+      h("th", { class: "n", text: "Lasted" }), h("th", { text: "Ended" }), h("th", { text: "What ran in that time" }))),
+    h("tbody", {}, a.sessions.map(s => h("tr", {}, h("td", { class: "ts" + (s.started ? "" : " muted"), text: s.started ? fmt.ts(s.started) : "not recorded" }),
+      h("td", { text: who(s) }), h("td", { text: s.host }), h("td", { text: s.tty }), h("td", { class: "n", text: fmt.dur(s.seconds) }),
+      h("td", {}, s.ended ? [fmt.ts(s.ended) + " ", h("span", { class: "sev " + (s.rc === 0 ? "pass" : "error"), text: "exit code " + s.rc })]
+        : h("span", { class: "flag", text: "no end recorded" })),
+      h("td", {}, ran(s))))))), more(a.sessions.length, a.sessions_total, "sessions")]
+    : h("p", { class: "empty", text: "No privileged session is on record." });
+  const refusals = a.refusals.length ? [h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "When (UTC)" }), h("th", { text: "Who" }), h("th", { text: "Host" }), h("th", { text: "Terminal" }),
+      h("th", { text: "Refused because" }), h("th", { text: "As logged" }))),
+    h("tbody", {}, a.refusals.map(s => h("tr", {}, h("td", { class: "ts", text: fmt.ts(s.ts) }), h("td", { text: who(s) }), h("td", { text: s.host }),
+      h("td", { text: s.tty }), h("td", { text: REFUSED_FOR[s.reason] || s.reason }),
+      h("td", { class: "detail" + (s.detail ? "" : " muted"), text: s.detail || "–" })))))), more(a.refusals.length, a.refusals_total, "refusals")]
+    : h("p", { class: "empty", text: "Nobody has been refused the privileged session." });
+  return h("section", {}, h("h2", { text: "Privileged sessions" }),
+    h("p", { class: "muted", text: sessionLog(a.log) + " Only this host's log is read." }),
+    sessions,
+    h("p", { class: "muted", text: "The session's log says who started it and when, not what it did. What ran is every tool call and block logged for " +
+      "that account on that host between the start and the end, so an ordinary session the same person had open then is counted too. " +
+      "Tool calls are kept " + fmt.days(a.calls_kept_days) + "; an older session shows none." }),
+    h("h3", { text: "Refused" }), refusals);
+}
+async function admin() {
+  const [e, r, a] = await Promise.all([get("/api/enrolment"), get("/api/retention"), get("/api/admin-sessions")]);
+  const count = st => e.people.filter(p => p.state === st).length;
+  const refused = e.people.reduce((a, p) => a + p.refused, 0);
+  const due = r.rows.reduce((a, x) => a + x.would_remove, 0);
+  const figs = h("div", { class: "figs" },
+    [["", a.sessions_total, "privileged sessions"], ["error", a.refusals_total, "refused"], ["", count("sending"), "people sending"], ["error", count("quiet"), "gone quiet"], ["", count("never"), "never sent"],
+     ["error", e.hosts.filter(x => x.stale).length, "hosts quiet"], ["error", refused, "files refused"]]
+      .map(([cls, v, l]) => h("div", { class: "fig " + (v ? cls : "") }, h("b", { text: fmt.n(v) }), h("span", { text: l }))));
+  const people = e.people.length ? h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "Person" }), h("th", { text: "Seat" }), h("th", { text: "Data" }),
+      h("th", { text: "Newest (UTC)" }), h("th", { text: "From hosts" }), h("th", { class: "n", text: "Files refused" }),
+      h("th", { text: "Last refusal" }))),
+    h("tbody", {}, e.people.map(p => h("tr", {}, h("td", { text: p.user }),
+      h("td", { class: p.seat ? "" : "muted", text: p.seat || "none" }),
+      h("td", {}, h("span", { class: "sev " + PERSON_STATE[p.state][0], text: PERSON_STATE[p.state][1] })),
+      h("td", { class: "ts", text: fmt.ts(p.last_data) }),
+      h("td", { class: p.hosts.length ? "" : "muted", text: p.hosts.join(", ") || "not said" }),
+      h("td", { class: "n" + (p.refused ? " hit" : ""), text: fmt.n(p.refused) }),
+      h("td", { class: p.last_refused ? "" : "muted", text: p.last_refused
+        ? fmt.ts(p.last_refused.ts) + ", " + p.last_refused.why : "–" }))))))
+    : h("p", { class: "empty", text: "Nobody has sent anything and no seat is listed in the config." });
+  const hosts = e.hosts.length ? h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "Host" }), h("th", { text: "Last heard (UTC)" }),
+      h("th", { class: "n", text: "People with events from it" }), h("th", { text: "Reported by" }))),
+    h("tbody", {}, e.hosts.map(x => h("tr", {}, h("td", { text: x.host }),
+      h("td", { class: "ts" }, fmt.ts(x.last_seen), x.stale ? h("span", { class: "flag bad", text: "quiet" }) : null),
+      h("td", { class: "n", text: fmt.n(x.people) }), h("td", { text: x.reported_by }))))))
+    : h("p", { class: "empty", text: "No host has checked in yet." });
+  const kept = h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { text: "Kind" }), h("th", { text: "What it is" }), h("th", { class: "n", text: "Kept for" }),
+      h("th", { class: "n", text: "At most" }), h("th", { class: "n", text: "Stored" }), h("th", { text: "Oldest (UTC)" }),
+      h("th", { class: "n", text: "Next clean-up removes" }))),
+    h("tbody", {}, r.rows.map(x => h("tr", {}, h("td", {}, h("span", { class: "sev " + x.severity, text: x.severity })),
+      h("td", { text: KEPT_AS[x.severity] }), h("td", { class: "n", text: fmt.days(x.days) }),
+      h("td", { class: "n", text: fmt.n(x.max_rows) + " rows" }), h("td", { class: "n", text: fmt.n(x.stored) }),
+      h("td", { class: "ts", text: fmt.ts(x.oldest) }),
+      h("td", { class: "n" + (x.would_remove ? " hit" : ""), text: fmt.n(x.would_remove) }))))));
+  show(
+    head("Admin", "Who used the privileged session, who is sending data, and how long it is kept. Read-only."),
+    figs,
+    privileged(a),
+    h("section", {}, h("h2", { text: "People" }),
+      h("p", { class: "muted", text: "Quiet means nothing newer than " + e.idle_days + " days is stored. Never sent means nothing is stored at all: " +
+        "the seat is unused, or that person's data does not reach this dashboard. The page cannot tell which. " +
+        "A refused file was not read because it is not what its name says; the Logs page lists each one under Log integrity." }),
+      people),
+    h("section", {}, h("h2", { text: "Hosts" }),
+      h("p", { class: "muted", text: "A host is quiet after " + e.stale_hours + " hours without a check-in." }), hosts),
+    h("section", {}, h("h2", { text: "How long logs are kept" }),
+      h("p", { class: "muted", text: (due ? "The next clean-up removes " + fmt.n(due) + (due === 1 ? " row" : " rows") + "."
+        : "The next clean-up removes nothing.") + " A row goes when it is older than its kind is kept for, or when its kind holds more rows than it may. " +
+        "These rules are set in the config file under retention; this page does not change them." }),
+      kept,
+      h("p", { class: "muted", text: "Token counts are never removed: " + fmt.n(r.usage.stored) + " calls are stored" +
+        (r.usage.oldest ? ", the oldest from " + fmt.ts(r.usage.oldest).slice(0, 10) : "") + ". The Update page keeps its newest " +
+        fmt.n(r.runs.keep) + " runs and holds " + fmt.n(r.runs.stored) + ". The privileged session's log is kept whole: " +
+        fmt.n(r.admin_log.stored) + (r.admin_log.stored === 1 ? " line." : " lines.") })));
+}
+
 // Policy ---------------------------------------------------------------------
 const FILE_STATE = { "not-configured": "Not configured", missing: "No file at this path", unreadable: "Cannot be read as JSON" };
 function chips(items, none) {
@@ -634,7 +749,7 @@ async function docs(want) {
 // <main> carries data-page, data-state (loading, ready, error, locked) and
 // data-at (the address it was drawn for) so a test, or a person with the
 // inspector, can tell a page that finished from one that failed.
-const PAGES = { overview, logs: () => logs(false), sessions, people, hosts, update, policy, docs };
+const PAGES = { overview, logs: () => logs(false), sessions, people, hosts, update, admin, policy, docs };
 function fail(e) {
   if (e instanceof Locked) {
     main.dataset.state = "locked";

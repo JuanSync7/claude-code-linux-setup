@@ -6,6 +6,7 @@
   "transcript_glob": "/home/*/.claude/projects",
   "user_from_path": "/home/([^/]+)/",
   "hook_log_dir": "/var/log/claude-code",
+  "admin_log": "",
   "spool": "",
   "feed": {"transcripts": "~/.claude/projects", "state_dir": "~/.claude/fleetdash"},
   "token_file": "",

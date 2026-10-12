@@ -234,6 +234,12 @@ def make_server(cfg, token=None, web=WEB):
                                       {"Content-Disposition": 'attachment; filename="people-%dd.csv"' % days})
                 elif path == "/api/hosts":
                     out = api.hosts(cfg, days=_int(q, "days", 30, 1, 3650))
+                elif path == "/api/enrolment":
+                    out = api.enrolment(cfg)
+                elif path == "/api/admin-sessions":
+                    out = api.admin_sessions(cfg)
+                elif path == "/api/retention":
+                    out = api.retention(cfg)
                 elif path == "/api/policy":
                     out = api.policy(cfg)
                 elif path == "/api/docs":

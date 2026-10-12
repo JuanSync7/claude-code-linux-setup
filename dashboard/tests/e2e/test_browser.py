@@ -1,9 +1,11 @@
 """Every page rendered in a real headless browser, through the same login a
 person uses: the printed URL, the token the page takes from it, the hash
 route, the page's own fetches under its Content-Security-Policy."""
+import os
 import unittest
 
-from tests.e2e.harness import Server, browser, cli, full_config, populated_fleet, render
+from tests.e2e.harness import Server, at, browser, cli, full_config, populated_fleet, render
+from tests.fixtures import admin_line
 
 
 class EveryPageRenders(unittest.TestCase):
@@ -22,7 +24,7 @@ class EveryPageRenders(unittest.TestCase):
         cls.f.close()
 
     def pages(self):
-        self.assertGreaterEqual(len(self.home.nav), 8, self.home.nav)  # a pass over no pages is a failure
+        self.assertGreaterEqual(len(self.home.nav), 9, self.home.nav)  # a pass over no pages is a failure
         return self.home.nav
 
     def test_the_login_url_lands_on_the_overview(self):
@@ -39,7 +41,8 @@ class EveryPageRenders(unittest.TestCase):
 
     # one thing only the fleet's own data can put on each page
     SHOWS = {"overview": "alice", "logs": "alice", "sessions": "alice", "people": "alice",
-             "hosts": "test-host", "policy": "Bash(sudo:*)", "docs": "Operator guide", "update": "Say hello"}
+             "hosts": "test-host", "policy": "Bash(sudo:*)", "docs": "Operator guide", "update": "Say hello",
+             "admin": "alice"}
 
     def test_each_page_shows_the_fleets_own_data(self):
         self.assertEqual(sorted(page for page, _ in self.pages()), sorted(self.SHOWS))
@@ -172,6 +175,66 @@ class EveryPageRenders(unittest.TestCase):
         # the page writes where it is into the frame, so a test can read it back
         self.assertIn('data-at="#/people"', p.dom)
         self.assertNotIn(self.srv.token, p.dom)
+
+
+class AdminPage(unittest.TestCase):
+    """The shared fleet plus what only the Admin page shows: carol holds a
+    seat and has sent nothing, dave's hook log is a symlink and is refused,
+    one of alice's passes is older than passes are kept, and alice held the
+    privileged session over her two logged events while bob was refused it."""
+
+    @classmethod
+    def setUpClass(cls):
+        browser()
+        cls.f = populated_fleet()
+        cls.f.hooklog("activity", "alice", [{"ts": at(40, "10:00"), "tool": "Bash", "detail": "an old pass"}])
+        os.symlink(os.path.join(cls.f.root, "elsewhere"), os.path.join(cls.f.root, "log", "activity", "dave.jsonl"))
+        log = cls.f.adminlog([
+            admin_line(at(2, "09:59"), 41, "alice", "admin session START bin=/usr/local/bin/claude eval=0"),
+            admin_line(at(2, "10:05"), 41, "alice", "admin session END rc=0"),
+            admin_line(at(1, "08:00"), 52, "alice", "admin session START bin=/usr/local/bin/claude eval=0"),
+            admin_line(at(1, "09:00"), 60, "bob", "REFUSED reason=unauthorised group=claude-admins", target="root")])
+        config = full_config(cls.f, admin_log=log,
+                             seats=[{"tier": "Max", "monthly_usd": 100.0, "users": ["alice", "carol"]}])
+        cli(config, "ingest")
+        cls.srv = Server(config)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+        cls.f.close()
+
+    def test_admin_says_who_is_sending_who_never_has_and_who_was_refused(self):
+        p = render(self.srv.url + "#/admin")
+        self.assertEqual(p.h1, "Admin")
+        self.assertIn('<td>carol</td><td class="">Max</td><td><span class="sev info">never sent</span></td>', p.dom)
+        self.assertIn('<td>alice</td><td class="">Max</td><td><span class="sev pass">sending</span></td>', p.dom)
+        self.assertIn("file not read: symlink, not followed", p.main_text)
+        self.assertIn('<b>1</b><span>files refused</span>', p.dom)
+
+    def test_admin_shows_each_privileged_session_with_what_ran_in_it_and_each_refusal(self):
+        p = render(self.srv.url + "#/admin")
+        self.assertEqual(p.main.get("data-state"), "ready", p.main_text[:300])
+        self.assertIn('<b>2</b><span>privileged sessions</span>', p.dom)
+        self.assertIn('<td class="n">6 min</td><td>%s <span class="sev pass">exit code 0</span></td>'
+                      % at(2, "10:05").replace("T", " ")[:16], p.dom)
+        # the tool call the hooks logged for alice inside those six minutes; her redaction is neither a call nor a block
+        self.assertIn("<summary>1 tool call, 0 blocked</summary>", p.dom)
+        self.assertIn('<span class="cmd">make test</span>', p.dom)
+        # the second start has no end: its duration and what it ran are unknown, not zero
+        self.assertIn('<span class="flag">no end recorded</span>', p.dom)
+        self.assertIn("unknown without both ends", p.main_text)
+        self.assertIn("Read from %s, last at " % os.path.join(self.f.root, "log", "admin.log"), p.main_text)
+        self.assertIn("<td>bob as root</td><td>test-host</td><td>/dev/pts/2</td><td>not in the admin group</td>"
+                      '<td class="detail">group=claude-admins</td>', p.dom)
+        self.assertIn("The privileged session's log is kept whole: 4 lines.", p.main_text)
+
+    def test_admin_shows_each_kind_of_log_with_its_rule_and_what_the_next_clean_up_removes(self):
+        p = render(self.srv.url + "#/admin")
+        self.assertIn('<td><span class="sev pass">pass</span></td><td>Tool calls that were let through</td>'
+                      '<td class="n">14 days</td><td class="n">1,000 rows</td>', p.dom)
+        # the one old pass the fixture holds is past its 14 days
+        self.assertIn("The next clean-up removes 1 row.", p.main_text)
 
 
 if __name__ == "__main__":

@@ -35,3 +35,22 @@ RUN_STATES = (
 # What a page is told for a row still marked running that no server is
 # running: the server stopped while it ran, and its result is not known.
 RUN_INTERRUPTED = "interrupted"
+
+# Where a person stands on the Admin page: their newest stored use or event is
+# recent, is older than the idle rule, or there is none at all.
+PERSON_STATES = ("sending", "quiet", "never")
+
+# The lines the privileged session's launcher writes to its own log.
+ADMIN_KINDS = (
+    "start",    # a session was opened
+    "end",      # it closed, with an exit code
+    "refused",  # someone was not let in, or the launcher stopped before opening one
+)
+# What the last ingest found where the config says that log is.
+ADMIN_LOG_STATES = (
+    "not-configured",  # the config names no file
+    "not-read-yet",    # one is named, and no ingest has run since
+    "absent",          # no file there: no privileged session has been started on this host
+    "unreadable",      # there, and it could not be opened or was refused
+    "read",
+)

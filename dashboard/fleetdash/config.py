@@ -19,6 +19,7 @@ KEYS = {
     "transcript_glob": str,        # glob of ~/.claude/projects directories; "" reads no home directly
     "user_from_path": str,         # regex; group 1 is the user name in a transcript path
     "hook_log_dir": str,           # holds activity/<user>.jsonl and denied/<user>.jsonl; "" reads none
+    "admin_log": str,              # the privileged session's own log on this host; "" reads none
     "spool": str,                  # directory people's feed batches arrive in; "" for no feed
     "feed": dict,                  # {transcripts, state_dir}: what `feed` reads and where it keeps its place; ~ is the caller's home
     "token_file": str,             # where serve keeps its login token between starts; "" for a new one each start
@@ -111,6 +112,8 @@ def load(path):
         raise ConfigError("runs.dir must be an absolute path when actions are listed: a run's output is kept there")
     if cfg["runs"]["keep"] < 1:
         raise ConfigError("runs.keep must be at least 1")
+    if cfg["admin_log"] and not os.path.isabs(cfg["admin_log"]):
+        raise ConfigError("admin_log must be an absolute path, or empty to read none")
     if cfg["host_stale_hours"] < 1:
         raise ConfigError("host_stale_hours must be at least 1")
     u = cfg["under_use"]

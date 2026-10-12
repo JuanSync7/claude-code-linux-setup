@@ -81,6 +81,20 @@ create table if not exists runs (
     bytes     integer            -- how much it printed; NULL while it runs
 );
 
+create table if not exists admin_log (
+    key     text primary key,   -- stable per source line, so a re-run inserts nothing
+    host    text not null,      -- the host whose log it is
+    ts      text not null,
+    pid     integer not null,   -- the launcher's: a start and its end share it
+    invoker text not null,      -- who ran the launcher
+    target  text not null,      -- the account the session ran as
+    tty     text not null,
+    kind    text not null,      -- vocab.ADMIN_KINDS
+    reason  text not null,      -- why, for a refusal; '' otherwise
+    rc      integer,            -- the exit code, for an end; NULL otherwise
+    detail  text not null       -- the rest of the line
+);
+
 create table if not exists meta (k text primary key, v text not null);
 """
 
@@ -124,9 +138,24 @@ def iso(dt):
     return dt.strftime(ISO)
 
 
+def prunable(con, cfg, now=None):
+    """How many events of each severity the next prune would remove: those
+    past the severity's age, and of the rest, those over its row cap."""
+    now = now or datetime.datetime.utcnow()
+    out = {}
+    for sev, rule in sorted(cfg["retention"].items()):
+        cutoff = iso(now - datetime.timedelta(days=rule["days"]))
+        stored, aged = con.execute("select count(*), coalesce(sum(ts<?), 0) from events where severity=?",
+                                   (cutoff, sev)).fetchone()
+        out[sev] = aged + max(0, stored - aged - rule["max_rows"])
+    return out
+
+
 def prune(cfg, now=None):
     """Drop events past their severity's age or row cap. Usage rows are kept:
-    they are small and the cost history needs them. Returns removed counts."""
+    they are small and the cost history needs them. So is the privileged
+    session's log: it is the record of who held privilege. Returns removed
+    counts."""
     now = now or datetime.datetime.utcnow()
     removed = {}
     con = connect(cfg)

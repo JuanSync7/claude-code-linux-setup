@@ -56,6 +56,12 @@ seat per month>, "users": ["<login>", ...]}`. The example file ships it empty, a
 site on annual billing or a negotiated rate pays something else. With no seats the seat cost
 the Overview sets usage against is zero.
 
+`admin_log` is the path of the privileged session's log on this host
+(`admin.log` in the log directory the hooks write to), or empty to read none. That
+file is written for root only, so the account the dashboard runs as must be
+given read access to it before the Admin page can show who used the session;
+`docs/ARCHITECTURE.md` says what the page can and cannot tell from it.
+
 `actions` is the whole list of commands the Update page can start, each with a
 fixed argument list, working directory and time limit. It ships empty: with
 no entry, the page can start nothing. `runs` is where each run's output is kept

@@ -162,7 +162,7 @@ class Serve(unittest.TestCase):
 
     def test_every_api_the_page_calls_exists_and_answers_json(self):
         with open(os.path.join(ROOT, "web", "app.js")) as fh:
-            calls = sorted(set(re.findall(r'"(/api/[a-z]+)', fh.read())))
+            calls = sorted(set(re.findall(r'"(/api/[a-z-]+)', fh.read())))
         self.assertGreaterEqual(len(calls), 9, calls)
         # the one call that is about a thing: ask for a thing the listing names
         first = self.srv.json("/api/docs")["groups"][0]["docs"][0]["id"]
