@@ -1956,7 +1956,7 @@ assert_rc "G17d dnf distro-sync exits 2" "$(rc)" 2 "$O"
 O=$(run_hook cc-upgrade-guard-hook.sh "$(bash_call 'sudo dnf -y upgrade claude-code')")
 assert_rc "G17e the plain upgrade verb still exits 2" "$(rc)" 2 "$O"
 
-# --- D1-D5: the denial hook. Without these, the reason field can go blind at a
+# --- D1-D6: the denial hook. Without these, the reason field can go blind at a
 # version move and nothing reports it.
 DHK="$SCRIPTS/../hooks/cc-denied-hook.sh"
 run_denied() {   # run_denied <json>
@@ -1996,6 +1996,29 @@ O=$(run_denied '{ not json at all')
 assert_rc "D5  malformed JSON still exits 0 - a logger must never block" "$(rc)" 0 "$O"
 O=$(run_denied '{}')
 assert_rc "D5  an empty payload still exits 0" "$(rc)" 0 "$O"
+
+# Where it happened and which call it was: a record that says only "Bash,
+# refused" cannot be matched to the chat it came from or tried again in place.
+# Read as JSON, so a value is checked under its own key and not found anywhere
+# on the line. A payload without them records them as empty, not missing.
+den_fields() {   # den_fields <log> -> cwd|mode|call_id of each line, or "unreadable"
+  python3 -c '
+import json, sys
+try:
+    for line in open(sys.argv[1]):
+        r = json.loads(line)
+        print("|".join(r[k] for k in ("cwd", "mode", "call_id")))
+except (OSError, ValueError, KeyError, TypeError):
+    print("unreadable")' "$1"
+}
+O=$(run_denied '{"tool_name":"Bash","tool_input":{"command":"ls"},"reason":"x","session_id":"s6","cwd":"/projects/x","permission_mode":"acceptEdits","tool_use_id":"toolu_06"}')
+CURRENT="$O"
+if [ "$(den_fields "$O")" = "/projects/x|acceptEdits|toolu_06" ]; then pass "D6  the directory, permission mode and call id are recorded"
+else fail "D6  the directory, permission mode and call id are recorded"; fi
+O=$(run_denied '{"tool_name":"Bash","tool_input":{"command":"ls"},"reason":"x"}')
+CURRENT="$O"
+if [ "$(den_fields "$O")" = "||" ]; then pass "D6  and are empty when the payload has none"
+else fail "D6  and are empty when the payload has none"; fi
 
 # --- S1-S8: the secret guard. It is ENFORCEMENT, not evidence - the only hook
 # that blocks a call - and it had no cases at all. Its seven checks lived in

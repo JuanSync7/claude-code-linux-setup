@@ -92,6 +92,18 @@ make verify
 ```
 
 <img src=x onerror=alert(1)> stays text.
+
+## Run it
+
+See [the exit codes](#exit-codes).
+
+### Exit codes
+
+## Check `it` twice
+
+### Exit codes
+
+#### What's next?
 """
 POLICY = {"permissions": {"deny": ["Bash(sudo:*)"], "ask": ["Bash(git push:*)"], "allow": ["Read"]},
           "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/opt/hooks/audit"}]}]},
@@ -105,7 +117,7 @@ def full_config(f, **over):
     in one setting, and one harmless action."""
     docs = os.path.join(f.root, "docs")
     os.makedirs(os.path.join(docs, "sub"), exist_ok=True)
-    other = "# The other page\n\nBack to [the guide](../Guide.md), on to [the goal](../../GOAL.md).\n"
+    other = "# The other page\n\nBack to [the guide](../Guide.md) and [its codes](../Guide.md#Exit-codes), on to [the goal](../../GOAL.md).\n"
     for name, text in (("Guide.md", GUIDE), ("sub/Other.md", other)):
         with open(os.path.join(docs, name), "w") as fh:
             fh.write(text)

@@ -230,31 +230,57 @@ const DECIDED_BY = { "automode-blocked": "Claude Code safety check", "automode-u
   "permission-rule": "Permission rule", "user-rejected": "The person said no", interrupted: "The person interrupted" };
 const decidedBy = s => DECIDED_BY[s] || s;
 
-// A stopped call's record: what was asked for, why it was stopped, and where.
-// The row shows the start of it; the rest opens beneath.
+// A stopped call's record: what was asked for in full, what Claude was told,
+// and where it happened. It opens as a row of its own beneath the call's row,
+// and says nothing that row already says.
 const ASKED = { command: "Command", file_path: "File", url: "URL", path: "Path", "": "Asked for" };
-function incident(e) {
+function preview(e) {
+  return e.incident.input !== null ? e.incident.input : e.detail || "What was asked for was not recorded";
+}
+function record(e) {
   const i = e.incident;
-  const fact = (label, ...value) => [h("dt", { text: label }), h("dd", {}, value)];
-  const cutNote = i.input !== null && i.input_len > i.input.length
-    ? h("p", { class: "muted", text: fmt.n(i.input_len) + " characters in all. The middle was left out." }) : null;
-  const asked = i.input !== null ? fact(ASKED[i.input_kind], h("pre", { class: "asked", text: i.input }), cutNote)
-    : fact("Asked for", h("span", { class: "muted", text: i.fields === null
+  const fact = (label, value) => value ? [h("dt", { text: label }), h("dd", { text: value })] : null;
+  const part = (title, note, body) => h("div", { class: "part" },
+    h("h3", {}, title, note ? h("span", { class: "muted", text: note }) : null), body);
+  const asked = i.input !== null
+    ? part(ASKED[i.input_kind], i.input_len > i.input.length
+        ? fmt.n(i.input_len) + " characters in all. The middle was left out." : "", h("pre", { class: "asked", text: i.input }))
+    : part("Asked for", "", h("p", { class: "muted", text: i.fields === null
       ? "Not recorded. The call was not in the part of the chat read with this block."
       : "Not recorded. Only a command, file, URL or path is kept"
         + (i.fields.length ? "; this call had " + i.fields.join(", ") + "." : "; this call had none.") }));
-  return h("details", { class: "incident" },
-    h("summary", { text: i.input !== null ? i.input : e.detail || "What was asked for was not recorded" }),
-    h("dl", { class: "facts" }, asked,
-      i.said ? fact("Claude was told", h("pre", { class: "asked", text: i.said })) : null,
-      fact("Stopped by", decidedBy(e.source) + (i.input !== null && e.detail && e.detail !== i.input ? " (" + e.detail + ")" : "")),
-      fact("Tool", e.tool || "not recorded"),
-      i.fields && i.fields.length ? fact("The call's fields", i.fields.join(", ")) : null,
-      fact("Person", e.user), e.host ? fact("Host", e.host) : null,
-      fact("When (UTC)", fmt.ts(e.ts)),
-      i.cwd ? fact("Directory", i.cwd) : null, i.branch ? fact("Git branch", i.branch) : null,
-      i.client ? fact("Claude Code", i.client) : null,
-      e.session ? fact("Chat", e.session) : null, i.call_id ? fact("Call", i.call_id) : null));
+  return h("div", { class: "record-body" },
+    h("div", { class: "said" }, asked, i.said ? part("Claude was told", "", h("pre", { class: "asked", text: i.said })) : null),
+    h("dl", { class: "facts" },
+      fact("Reason code", i.input !== null && e.detail !== i.input ? e.detail : ""),
+      fact("Directory", i.cwd), fact("Git branch", i.branch), fact("Claude Code", i.client),
+      fact("Chat", e.session), fact("Call", i.call_id),
+      fact("Also in the call", i.input !== null && i.fields ? i.fields.filter(f => f !== i.input_kind).join(", ") : "")));
+}
+// One event as table rows: its own, and beneath it the record of a stopped
+// call, closed until the row is clicked.
+function logRows(e, n, hosted, columns, open) {
+  const cells = [
+    h("td", { class: "ts", text: fmt.ts(e.ts) }), h("td", { text: e.user }),
+    hosted ? h("td", { class: e.host ? "" : "muted", text: e.host || "–" }) : null,
+    h("td", {}, h("span", { class: "sev " + e.severity, text: e.severity })),
+    h("td", { text: CAT_LABEL[e.category] || e.category }), h("td", { title: e.source, text: decidedBy(e.source) }),
+    h("td", { text: e.tool })];
+  if (!e.incident) return h("tr", {}, cells, h("td", { class: "detail", text: e.detail }));
+  const name = "record-" + n;
+  const button = h("button", { class: "opener", type: "button", "aria-label": "The record of this stopped call",
+    "aria-expanded": String(open.has(n)), "aria-controls": name });
+  const beneath = h("tr", { class: "record", id: name, hidden: open.has(n) ? null : "" },
+    h("td", { colspan: columns }, record(e)));
+  const row = h("tr", { class: "has-record" + (open.has(n) ? " opened" : ""), onclick: () => {
+    if (String(getSelection())) return;  // the click that ends a selection is not a request to close
+    const now = beneath.hidden;
+    now ? open.add(n) : open.delete(n);
+    beneath.hidden = !now;
+    row.classList.toggle("opened", now);
+    button.setAttribute("aria-expanded", String(now));
+  } }, cells, h("td", { class: "detail" }, button, h("span", { class: "preview", text: preview(e) })));
+  return [row, beneath];
 }
 
 async function loadLogs(append) {
@@ -263,6 +289,7 @@ async function loadLogs(append) {
   for (const k of ["user", "severity", "category", "source", "tool"]) if (L[k]) q.set(k, L[k]);
   const r = await get("/api/events?" + q);
   L.rows = append ? L.rows.concat(r.rows) : r.rows;
+  if (!append) L.open = new Set();  // which records are open, by row; rows only ever get added to
   L.total = r.total; L.facets = r.facets; L.byCat = r.by_category;
 }
 
@@ -285,13 +312,7 @@ async function logs(append) {
   const table = L.rows.length ? h("div", { class: "scroll" }, h("table", {},
     h("thead", {}, h("tr", {}, ["When (UTC)", "Person", hosted && "Host", "Result", "Kind", "Decided by", "Tool", "Detail"]
       .filter(Boolean).map(t => h("th", { text: t })))),
-    h("tbody", {}, L.rows.map(e => h("tr", {},
-      h("td", { class: "ts", text: fmt.ts(e.ts) }), h("td", { text: e.user }),
-      hosted ? h("td", { class: e.host ? "" : "muted", text: e.host || "–" }) : null,
-      h("td", {}, h("span", { class: "sev " + e.severity, text: e.severity })),
-      h("td", { text: CAT_LABEL[e.category] || e.category }), h("td", { title: e.source, text: decidedBy(e.source) }),
-      h("td", { text: e.tool }),
-      e.incident ? h("td", { class: "detail" }, incident(e)) : h("td", { class: "detail", text: e.detail }))))))
+    h("tbody", {}, L.rows.map((e, n) => logRows(e, n, hosted, hosted ? 8 : 7, L.open)))))
     : h("p", { class: "empty", text: "No events match these filters." });
   show(
     head("Logs", fmt.n(L.total) + " events"),
@@ -762,7 +783,7 @@ function listAt(lines, i, inl) {
   }
   return [el, i];
 }
-function markdown(src, link) {
+function markdown(src, link, section) {
   const lines = src.replace(/\r/g, "").split("\n"), out = [], inl = t => inline(t, link);
   for (let i = 0, m; i < lines.length;) {
     const line = lines[i];
@@ -774,7 +795,9 @@ function markdown(src, link) {
       out.push(h("pre", {}, h("code", { text: body.join("\n") })));
     } else if ((m = /^(#{1,6})\s+(.*?)\s*#*$/.exec(line))) {
       // the page's own headline is the h1, so a document's headings start one level down
-      out.push(h("h" + Math.min(m[1].length + 1, 6), {}, inl(m[2]))); i++;
+      const el = h("h" + Math.min(m[1].length + 1, 6), {}, inl(m[2]));
+      if (section) el.id = SECTION + section(el.textContent, m[1].length);
+      out.push(el); i++;
     } else if (RULE.test(line)) { out.push(h("hr")); i++; }
     else if (line.startsWith(">")) {
       const body = [];
@@ -795,36 +818,104 @@ function markdown(src, link) {
   }
   return out;
 }
+// A heading's address is its words the way GitHub writes them, so a link
+// written for the repository's own view lands on the same heading here.
+const SECTION = "section-";
+const READING_LINE = 120;  // px from the top of the window: a heading above it has been reached
+function slug(text) {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").trim().replace(/\s/g, "-");
+}
 function docLink(doc, byPath) {
   // a link to another listed document opens it here; a web link opens a new tab;
   // anything else stays text, since the server would not serve it
   return (label, href) => {
     if (/^https?:\/\//.test(href)) return h("a", { href, target: "_blank", rel: "noopener noreferrer" }, label);
+    const [file, heading] = href.split("#");
     const at = doc.path.split("/").slice(0, -1);
-    for (const part of href.split("#")[0].split("/")) {
+    for (const part of file.split("/")) {
       if (part === "..") at.pop();
       else if (part && part !== ".") at.push(part);
     }
-    const id = byPath.get(at.join("/"));
-    return id ? h("a", { href: "#/docs/" + encodeURIComponent(id) }, label)
+    const id = file ? byPath.get(at.join("/")) : doc.id;
+    return id ? h("a", { href: docRoute(id, heading ? slug(heading) : "") }, label)
       : h("span", { class: "nolink", title: href + " is not in this list" }, label);
   };
 }
+function docRoute(id, section) {
+  return "#/docs/" + encodeURIComponent(id) + (section ? "/" + encodeURIComponent(section) : "");
+}
+// Which entry of "On this page" is marked: the section the address names, and
+// after that whichever heading the reader has scrolled to.
+let onPage = [];  // [section, its entry in the list] for the document shown
+function mark(section) {
+  for (const [name, a] of onPage)
+    name === section ? a.setAttribute("aria-current", "location") : a.removeAttribute("aria-current");
+}
+// Where the window was put for the section an address names. Near the end of
+// a document that section cannot reach the top, so until the reader moves
+// from there it stays the marked one.
+let scrolled = 0, put = null;
+document.addEventListener("scroll", () => {
+  cancelAnimationFrame(scrolled);
+  scrolled = requestAnimationFrame(() => {
+    if (scrollY === put) return;
+    put = null;
+    const passed = onPage.map(([name]) => [name, document.getElementById(SECTION + name)])
+      .filter(([, el]) => el && el.getBoundingClientRect().top <= READING_LINE);
+    if (passed.length) mark(passed[passed.length - 1][0]);
+  });
+}, { passive: true, capture: true });
 async function docs(want) {
   const idx = await get("/api/docs");
   const all = idx.groups.flatMap(g => g.docs);
   const byPath = new Map(all.map(d => [d.path, d.id]));
-  const id = all.some(d => d.id === want) ? want : all.length ? all[0].id : null;
+  const listed = v => all.some(d => d.id === v);
+  // #/docs/<id>/<section>: an id can hold a slash and a section cannot
+  const cut = want.lastIndexOf("/");
+  const [id, section] = listed(want) ? [want, ""] : cut > 0 && listed(want.slice(0, cut)) ? [want.slice(0, cut), want.slice(cut + 1)]
+    : [all.length ? all[0].id : null, ""];
+  const go = () => {
+    mark(section);
+    const el = section && document.getElementById(SECTION + section);
+    el ? el.scrollIntoView() : scrollTo(0, 0);
+    put = scrollY;
+  };
+  // another section of the document already on the page: it is not fetched and drawn again
+  const shown = main.querySelector("article.doc");
+  if (shown && shown.dataset.doc === id) return go();
   const doc = id ? await get("/api/doc?id=" + encodeURIComponent(id)) : null;
   const list = h("nav", { class: "doclist", "aria-label": "Documents" }, idx.groups.map(g => [
     h("p", { class: "group", text: g.label }),
     g.found ? null : h("p", { class: "muted", text: "Not found on this host." }),
-    g.docs.map(d => h("a", { href: "#/docs/" + encodeURIComponent(d.id), title: d.name,
+    g.docs.map(d => h("a", { href: docRoute(d.id, ""), title: d.name,
       "aria-current": d.id === id ? "page" : null }, inline(d.title, label => label)))]));
+  if (!doc) return show(head("Docs", "No documents"),
+    h("p", { class: "empty", text: "No documents are configured. List Markdown directories under docs in the config." }));
+  // the sections under the document's title, two levels deep; a heading said twice gets a number, as GitHub gives it
+  const sections = [], taken = new Map();
+  const body = markdown(doc.markdown, docLink(doc, byPath), (text, level) => {
+    const base = slug(text), n = taken.get(base) || 0;
+    taken.set(base, n + 1);
+    const name = n ? base + "-" + n : base;
+    if (level === 2 || level === 3)
+      sections.push({ name, entry: h("a", { href: docRoute(id, name), class: level === 3 ? "sub" : null, text }) });
+    return name;
+  });
+  const toc = sections.length ? h("nav", { class: "toc", "aria-label": "On this page" },
+    h("p", { class: "group", text: "On this page" }),
+    sections.map(s => s.entry)) : null;
+  onPage = sections.map(s => [s.name, s.entry]);
+  const at = all.findIndex(d => d.id === id);
+  const beside = (d, cls, label) => d ? h("a", { class: cls, href: docRoute(d.id, "") },
+    h("span", { class: "muted", text: label }), inline(d.title, t => t)) : null;
   show(
-    head("Docs", doc ? doc.group + ", " + doc.name : "No documents"),
-    all.length ? h("div", { class: "docs" }, list, h("article", { class: "doc" }, markdown(doc.markdown, docLink(doc, byPath))))
-      : h("p", { class: "empty", text: "No documents are configured. List Markdown directories under docs in the config." }));
+    head("Docs", doc.group + ", " + doc.name),
+    h("div", { class: "docs" }, list,
+      h("article", { class: "doc", "data-doc": id }, body,
+        h("nav", { class: "pager", "aria-label": "More documents" },
+          beside(all[at - 1], "prev", "Previous"), beside(all[at + 1], "next", "Next"))),
+      toc));
+  go();
 }
 
 // Routing --------------------------------------------------------------------

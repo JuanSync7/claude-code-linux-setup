@@ -88,6 +88,12 @@ rec = {
     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "user": sys.argv[2],
     "session": d.get("session_id", ""),
+    # Where it happened and which call it was, named as cc-audit-hook.sh names
+    # them: without these a refusal cannot be matched to its chat or retried
+    # in place. A payload without them records them empty.
+    "cwd": d.get("cwd", ""),
+    "mode": d.get("permission_mode", ""),
+    "call_id": d.get("tool_use_id", ""),
     "tool": tool,
     "detail": (cap(detail) if detail is not None else None),
     "detail_len": (len(str(detail)) if detail is not None else None),

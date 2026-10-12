@@ -427,10 +427,11 @@ class _hook_reader(object):
             # the hook says what was asked for and not which field it was, and
             # nothing of what Claude was told; its length is the hook's count
             # where it is one, as the hook cuts too
-            what, n = _plain(rec.get("detail")), rec.get("detail_len")
+            what, n, call = _plain(rec.get("detail")), rec.get("detail_len"), _plain(rec.get("call_id"))
             return [event(key, ts, self.user, session, "deny", "denial",
                            rec.get("denied_by"), tool, rec.get("detail"), self.host),
                     incident(key, ("", cut(what)) if what else None,
+                             cwd=_plain(rec.get("cwd")), call_id=call if len(call) <= CODE_MAX else "",
                              length=n if isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= SIZE_MAX
                              else len(what))]
         if rec.get("event") == "redaction":

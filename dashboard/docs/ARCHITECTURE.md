@@ -160,7 +160,7 @@ page opens beneath it:
 | Its full length, when it was shortened | A text over the limit keeps both ends and a note of how much was left out, so padding cannot push the part that matters out of the record |
 | The names of the call's other fields | The transcript; names only |
 | What Claude was told when it was stopped | The transcript's result for that call: the rule's or the classifier's own words. The hook's log does not hold it, so a record made from that log has none |
-| The directory, git branch, Claude Code version and the call's id | The transcript's record of the block |
+| The directory, git branch, Claude Code version and the call's id | The transcript's record of the block. The hook's log has the directory and the call's id, from a hook that writes them; it has no branch or version |
 | Who, when, on which host, in which chat, which tool, who decided | The block's event |
 
 What a call would have written is not kept: an edit's old and new text, a
@@ -380,14 +380,14 @@ dashboard does not make it.
 | Page | Shows |
 | --- | --- |
 | Overview | API-price equivalent against seats; tokens, people, blocks, hidden credentials, API errors, limit hits, chat storage, hosts; tokens by person and per day; a table of models for the subscription and another for Bedrock, each with input, output, cache-read and cache-write tokens and their cost at the configured prices; blocks by the layer that decided |
-| Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one. A stopped call opens onto its record: what was asked for, what Claude was told, who decided, and where it happened |
+| Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one. A stopped call's row is clicked to open its record as a row of its own beneath it, across the whole table: what was asked for in full, what Claude was told, and where it happened. The record holds nothing its row already says |
 | Chat storage | Size by age band, by person, and the largest chats |
 | People | Everyone with use or a seat: tokens, API-price equivalent against the seat's cost, active days, last use, five-hour and weekly limit hits, and why someone looks under-used (never used, unused for `idle_days`, under `median_fraction` of the median). The table downloads as CSV, for a report |
 | Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
 | Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets. Rules to add or remove are drafted there as a patch for a merge request; the page applies nothing |
 | Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
 | Admin | Who used the privileged session: each start with its end, how long it lasted and its exit code, each refusal with its reason, and the tool calls and blocks logged for that account on that host between the start and the end. Who is sending data: each person as sending, quiet (nothing newer than `idle_days`) or never sent, the hosts their events came from, and the files of theirs that were refused; each host and when it was last heard. How long logs are kept: each result's age limit and row cap, how many rows it holds, and how many the next `prune` would remove. Read-only |
-| Docs | The Markdown documents under the directories the config lists, rendered in the page. A link to another listed document opens it; any other relative link stays text |
+| Docs | The Markdown documents under the directories the config lists, rendered in the page in three columns: the documents by group on the left, the one being read in the middle, and its sections on the right, where the one the reader has reached is marked. Each section has an address of its own, written as GitHub writes a heading's, so a link to a heading lands on it. A document ends with the one before it and the one after. A link to another listed document opens it; any other relative link stays text |
 
 Docs are rendered by a small reader in `web/app.js` that covers headings,
 lists, tables, code, quotes, links and emphasis. It builds elements and sets
@@ -457,8 +457,10 @@ purpose and a test must go red.
   on what it was asked. The same is true of the commands the audit hook logs.
 - The record of a stopped call does not say which rule matched, which
   permission mode the session was in, or which policy the host held at that
-  moment: no transcript record has been seen to carry them. The Hosts page
-  gives the policy a host holds now. It does not say what Claude did next
+  moment. No transcript record has been seen to carry them. The denial hook
+  logs the permission mode, but the store has no place for it: adding one is
+  a change of schema, and every store is built again. The Hosts page gives
+  the policy a host holds now. It does not say what Claude did next
   either: whether it tried the same thing another way.
 - A block whose call was written to the transcript before an ingest and
   answered after it has no command in its record. An ingest that starts
@@ -498,6 +500,8 @@ purpose and a test must go red.
   local filesystems and has not been confirmed on a filer.
 - A click on Run, and on Download CSV, is not covered by an automated
   browser test: the browser tests read a rendered page and cannot click. The
+  one click that is covered, opening a stopped call's record, is made by a
+  script added to a copy of the page, not by a pointer. The
   requests the buttons send are covered at process level, and the page's
   display of a finished run in the browser; following a run while it prints
   is covered at the API, not in the browser.
@@ -524,6 +528,9 @@ purpose and a test must go red.
   together; only the Overview separates them.
 - The page's Markdown reader is written for the repository's own documents;
   a document built to be slow to read can stall the tab that opens it.
+- On the Docs page, which section an address marks is covered by a browser
+  test. That the window moves to it, and that the mark follows the reader's
+  scrolling, are not: the test browser prints a page and does not scroll.
 - With direct ingest, one collector reads one host's files, and lines appended
   to a log after the last ingest and before a rotation are lost with the
   rotated file: rotated copies are not read.

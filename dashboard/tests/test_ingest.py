@@ -386,6 +386,25 @@ class IngestHookLogs(unittest.TestCase):
         self.assertEqual(rows(self.cfg["store"], "select i.input, i.input_len from incidents i join events e "
                               "on e.key=i.key order by e.ts"), [(cmd, 9000), (None, None), ("ls", 2)])
 
+    def test_a_hook_denial_says_where_it_happened_and_which_call_it_was(self):
+        # the hook writes these from the payload; what is not text, or a call id
+        # too long to be one, is unknown, not stored
+        self.f.hooklog("denied", "alice", [
+            {"ts": "2026-10-01T10:00:02Z", "tool": "Bash", "detail": "ls", "denied_by": "rule",
+             "cwd": "/projects/x", "mode": "default", "call_id": "toolu_01"},
+            {"ts": "2026-10-01T10:00:03Z", "tool": "Bash", "detail": "ls", "denied_by": "rule",
+             "cwd": 7, "call_id": "t" * (ingest.CODE_MAX + 1)},
+            {"ts": "2026-10-01T10:00:04Z", "tool": "Bash", "detail": "ls", "denied_by": "rule",
+             "cwd": "d" * (ingest.PLACE_MAX + 5), "call_id": ["toolu_02"]},
+            {"ts": "2026-10-01T10:00:05Z", "tool": "Bash", "detail": "ls", "denied_by": "rule"},
+            {"ts": "2026-10-01T10:00:06Z", "tool": "Bash", "detail": "ls", "denied_by": "rule",
+             "cwd": "/p\ud800", "call_id": "toolu_\ud800"}])
+        ingest.run(self.cfg)
+        self.assertEqual(rows(self.cfg["store"], "select i.cwd, i.call_id, i.branch, i.client from incidents i "
+                              "join events e on e.key=i.key order by e.ts"),
+                         [("/projects/x", "toolu_01", "", ""), ("", "", "", ""),
+                          ("d" * ingest.PLACE_MAX, "", "", ""), ("", "", "", ""), ("", "", "", "")])
+
     def test_a_log_not_owned_by_its_named_user_is_not_read(self):
         # The log directories are sticky and world-writable: anyone can
         # create <victim>.jsonl. Here the runner owns a file named for alice.
