@@ -231,3 +231,9 @@ td a { color: var(--blue); text-underline-offset: 2px; white-space: nowrap; }
 @media (prefers-reduced-motion: no-preference) {
   .ratio i, .bars .t i { transition: width .5s ease-out; }
 }
+.draft form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.draft input[type=text] { font: 12.5px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 7px; color: var(--ink); min-width: 0; }
+.draft .rules { margin: 14px 0; max-width: 72ch; }
+.patch { margin: 0 0 12px; padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule); border-radius: 7px;
+  font: 12.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; overflow-x: auto; white-space: pre; }
+.draft .rules a { color: var(--ink); margin-left: 8px; }

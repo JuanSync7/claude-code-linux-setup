@@ -114,7 +114,8 @@ def full_config(f, **over):
         fh.write("# The goal\n")
     deployed, source = os.path.join(f.root, "deployed.json"), os.path.join(f.root, "source.json")
     with open(source, "w") as fh:
-        json.dump(POLICY, fh)
+        # laid out on lines, as a repository's file is: a draft is written into the text
+        fh.write(json.dumps(POLICY, indent=2) + "\n")
     with open(deployed, "w") as fh:
         json.dump(dict(POLICY, sandbox={"enabled": False}), fh)
     cfg = dict(docs=[{"label": "Guides", "path": docs}, {"label": "Goal", "path": goal}], policy={"deployed": deployed, "source": source},

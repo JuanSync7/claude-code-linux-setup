@@ -58,3 +58,6 @@ ADMIN_LOG_STATES = (
 # Which field of a stopped tool call says what it asked for, in the order the
 # denial hook looks for them. Nothing else of a call's input is kept.
 INPUT_KINDS = ("command", "file_path", "url", "path")
+
+# What a drafted policy change does to a list of rules.
+DRAFT_OPS = ("add", "remove")

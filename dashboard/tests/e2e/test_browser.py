@@ -1,8 +1,10 @@
 """Every page rendered in a real headless browser, through the same login a
 person uses: the printed URL, the token the page takes from it, the hash
 route, the page's own fetches under its Content-Security-Policy."""
+import json
 import os
 import unittest
+import urllib.parse
 
 from tests.e2e.harness import Server, at, browser, cli, full_config, populated_fleet, render
 from tests.fixtures import admin_line
@@ -74,6 +76,45 @@ class EveryPageRenders(unittest.TestCase):
         self.assertIn("They differ in: sandbox.", p.main_text)
         self.assertIn("HTTPS_PROXY", p.main_text)
         self.assertNotIn("proxy.invalid", p.dom)
+
+    def route(self, *edits):
+        # written as the page writes it, so a link the page makes can be looked for
+        edits = [{"op": op, "list": kind, "rule": rule} for op, kind, rule in edits]
+        return "#/policy/" + urllib.parse.quote(json.dumps(edits, separators=(",", ":")), safe="!*'()")
+
+    def draft(self, *edits):
+        return self.srv.url + self.route(*edits)
+
+    def test_policy_offers_a_draft_and_shows_no_patch_until_one_is_asked_for(self):
+        p = render(self.srv.url + "#/policy")
+        self.assertIn("Nothing is applied from this page", p.main_text)
+        self.assertIn("Add to draft", p.main_text)
+        # the rules that can be taken out are the repository's
+        self.assertIn('<option value="[&quot;ask&quot;,&quot;Bash(git push:*)&quot;]">', p.dom)
+        self.assertNotIn('<pre class="patch"', p.dom)
+        self.assertNotIn("git apply", p.main_text)
+
+    def test_a_drafted_change_is_a_patch_with_how_to_apply_it_and_a_way_back(self):
+        hostile = "<img src=x onerror=alert(1)>"
+        p = render(self.draft(("add", "deny", "Bash(dd:*)"), ("remove", "allow", "Read"), ("add", "ask", hostile)))
+        self.assertRegex(p.dom, r'<pre class="patch">[^<]*\n\+ +"Bash\(dd:\*\)"')
+        self.assertRegex(p.dom, r'<pre class="patch">[^<]*\n- +"Read"')
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", p.dom)
+        self.assertNotIn("<img", p.dom)
+        # the lists here are a line or two long, so the patch has no lines around a change
+        self.assertIn("git apply --unidiff-zero policy-change.patch", p.main_text)
+        self.assertIn("Download the patch", p.main_text)
+        # each change can be taken out again: a link to the draft without it
+        self.assertEqual(p.dom.count(">Take out</a>"), 3)
+        self.assertIn('href="%s"' % self.route(("add", "deny", "Bash(dd:*)"), ("add", "ask", hostile)), p.dom)
+
+    def test_a_draft_that_cannot_be_made_says_why_and_shows_no_patch(self):
+        p = render(self.draft(("add", "deny", "Bash(sudo:*)")))
+        self.assertIn("Bash(sudo:*) is already in the deny list", p.main_text)
+        self.assertNotIn('<pre class="patch"', p.dom)
+        self.assertEqual(p.dom.count(">Take out</a>"), 1)
+        q = render(self.srv.url + "#/policy/not-a-draft")
+        self.assertIn("edits must be a JSON list of changes", q.main_text)
 
     def test_a_document_is_rendered_as_elements_and_its_markup_stays_text(self):
         p = render(self.srv.url + "#/docs")

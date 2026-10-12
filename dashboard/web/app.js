@@ -81,7 +81,10 @@ async function get(path) {
 async function save(path, name) {
   const r = await call(path);
   if (!r.ok) throw new Error("HTTP " + r.status);
-  const a = h("a", { href: URL.createObjectURL(await r.blob()), download: name });
+  hand(await r.blob(), name);
+}
+function hand(blob, name) {
+  const a = h("a", { href: URL.createObjectURL(blob), download: name });
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -520,8 +523,58 @@ const FILE_STATE = { "not-configured": "Not configured", missing: "No file at th
 function chips(items, none) {
   return items.length ? h("p", { class: "chips" }, items.map(t => h("code", { text: t }))) : h("p", { class: "muted", text: none });
 }
-async function policy() {
+const RULE_LIST = { deny: "Always blocked", ask: "Ask first", allow: "Allowed without asking" };
+const PATCH_NAME = "policy-change.patch";
+// A draft lives in the address, so it survives a reload and can be sent to someone:
+// #/policy/<the changes as JSON>. The server checks every one of them.
+function draftRoute(edits) {
+  return "#/policy" + (edits.length ? "/" + encodeURIComponent(JSON.stringify(edits)) : "");
+}
+async function drafting(p, arg) {
+  let edits = [];
+  try {
+    const given = JSON.parse(arg || "[]");
+    if (Array.isArray(given)) edits = given.filter(e => e && typeof e === "object")
+      .map(e => ({ op: String(e.op), list: String(e.list), rule: String(e.rule) }));
+  } catch (e) { /* not a draft: the server says so below */ }
+  let made = null, refused = "";
+  if (arg) {
+    try { made = await get("/api/policy-draft?edits=" + encodeURIComponent(arg)); } catch (e) {
+      if (e instanceof Locked) throw e;
+      refused = e.message;
+    }
+  }
+  const go = more => { location.hash = draftRoute(edits.concat(more)); };
+  const lists = Object.keys(RULE_LIST);
+  const addTo = h("select", { "aria-label": "List" }, lists.map(k => h("option", { value: k, text: RULE_LIST[k] })));
+  const rule = h("input", { type: "text", required: "", maxlength: "500", size: "32", placeholder: "Bash(dd:*)", "aria-label": "Rule" });
+  const has = lists.filter(k => p.source.rules[k].length);
+  const taken = h("select", { "aria-label": "Rule to remove" }, has.map(k => h("optgroup", { label: RULE_LIST[k] },
+    p.source.rules[k].map(r => h("option", { value: JSON.stringify([k, r]), text: r })))));
+  return h("section", { class: "draft" }, h("h2", { text: "Draft a change" }),
+    h("p", { class: "muted", text: "Say which rules to add or remove and the page writes a patch for a merge request. "
+      + "Nothing is applied from this page: the policy changes when the patch is reviewed, merged and installed." }),
+    h("form", { onsubmit: e => { e.preventDefault(); go({ op: "add", list: addTo.value, rule: rule.value.trim() }); } },
+      h("span", { class: "muted", text: "Add to" }), addTo, rule, h("button", { class: "btn", type: "submit", text: "Add to draft" })),
+    has.length ? h("form", { onsubmit: e => { e.preventDefault(); const [k, r] = JSON.parse(taken.value); go({ op: "remove", list: k, rule: r }); } },
+      h("span", { class: "muted", text: "Remove" }), taken, h("button", { class: "btn", type: "submit", text: "Remove in draft" })) : null,
+    edits.length ? h("ul", { class: "rules" }, edits.map((e, n) => h("li", {},
+      (e.op === "remove" ? "Remove from " : "Add to ") + (RULE_LIST[e.list] || e.list) + ": ", h("code", { text: e.rule }), " ",
+      h("a", { href: draftRoute(edits.filter((_, m) => m !== n)), text: "Take out" })))) : null,
+    refused ? h("p", { class: "err", text: "No patch: " + refused + "." }) : null,
+    made ? [
+      h("p", {}, "The patch for ", h("code", { text: made.file }), ", against the file with SHA-256 ",
+        h("code", { title: made.base_sha256, text: made.base_sha256.slice(0, 16) }), "."),
+      h("pre", { class: "patch", text: made.patch }),
+      h("p", {}, h("button", { class: "btn primary", type: "button", text: "Download the patch",
+        onclick: () => hand(new Blob([made.patch], { type: "text/x-diff" }), PATCH_NAME) })),
+      h("p", { class: "muted" }, "In a checkout of the repository, on a new branch: ",
+        h("code", { text: made.apply.concat(PATCH_NAME).join(" ") }), ". Then commit it and open the merge request.",
+        made.in_repository ? "" : " The policy file here is not inside a git checkout, so the patch names it by its file name alone.")] : null);
+}
+async function policy(arg) {
   const p = await get("/api/policy");
+  const draft = p.source.state === "ok" ? await drafting(p, arg) : null;
   const side = (title, f) => h("div", {}, h("h2", { text: title }),
     h("p", { class: "path", text: f.path || "–" }),
     h("p", { class: f.state === "ok" ? "" : "muted" }, f.state === "ok"
@@ -558,7 +611,8 @@ async function policy() {
         h("div", {}, h("h2", { text: "Environment variables it sets" }), chips(shown.env, "None."),
           h("p", { class: "muted", text: "Names only. The values stay on the host." })),
         h("div", {}, h("h2", { text: "Every setting it carries" }), chips(shown.keys, "None.")))]
-      : h("section", {}, h("p", { class: "empty", text: "No policy file could be read, so there is nothing to show. Check policy.deployed and policy.source in the config." })));
+      : h("section", {}, h("p", { class: "empty", text: "No policy file could be read, so there is nothing to show. Check policy.deployed and policy.source in the config." })),
+    draft);
 }
 
 // Update ---------------------------------------------------------------------

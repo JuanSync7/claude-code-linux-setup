@@ -253,6 +253,26 @@ output), its duration and how much it printed. The page reads the first
 run still marked as running that the server is not running was left by a
 server that stopped: it is shown as interrupted, with no result.
 
+### Drafting a policy change
+
+The Policy page takes rules to add to or remove from the deny, ask and allow
+lists and answers with a patch against `policy.source`, the repository's
+policy file. It is a `GET` and writes nothing: no file, no row, no host. The
+policy changes only when a person applies the patch in a checkout, it is
+reviewed and merged, and a host installs it. Anyone with the login can draft,
+because a draft has no effect until that review.
+
+The draft is in the page's address (`#/policy/` and the changes as JSON), so
+it survives a reload and can be sent to a colleague; the server checks every
+change again each time: at most 50, each a rule of one printable line of at
+most 500 characters, none already made, none naming a rule that is not there
+to remove. The policy file is laid out by hand, so only the lists a draft
+changes are rewritten in its text, and the result must parse to exactly the
+document the draft describes or no patch is given. The lines a patch shows
+around a change never leave the lists being changed: it shows rules, as the
+page does, and never an environment value. Its first lines say what it does
+and the SHA-256 of the file it was drafted against.
+
 ## What the figures can be trusted for
 
 Every file ingest reads was written by the person it describes: their own
@@ -364,7 +384,7 @@ dashboard does not make it.
 | Chat storage | Size by age band, by person, and the largest chats |
 | People | Everyone with use or a seat: tokens, API-price equivalent against the seat's cost, active days, last use, five-hour and weekly limit hits, and why someone looks under-used (never used, unused for `idle_days`, under `median_fraction` of the median). The table downloads as CSV, for a report |
 | Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
-| Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets |
+| Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets. Rules to add or remove are drafted there as a patch for a merge request; the page applies nothing |
 | Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
 | Admin | Who used the privileged session: each start with its end, how long it lasted and its exit code, each refusal with its reason, and the tool calls and blocks logged for that account on that host between the start and the end. Who is sending data: each person as sending, quiet (nothing newer than `idle_days`) or never sent, the hosts their events came from, and the files of theirs that were refused; each host and when it was last heard. How long logs are kept: each result's age limit and row cap, how many rows it holds, and how many the next `prune` would remove. Read-only |
 | Docs | The Markdown documents under the directories the config lists, rendered in the page. A link to another listed document opens it; any other relative link stays text |
@@ -394,7 +414,7 @@ Pages that are not built, and what each needs first:
 | Admin: the privileged session on other hosts | The page reads the session log of the host the dashboard runs on. Another host's log would have to reach the collector, and `feed` cannot carry it: it runs as each person, and the log is root's |
 | Admin: changing retention | The page shows the rules and does not change them: they are in the config file, which the server only reads |
 | Skills and connectors | A shared catalogue people can install from, and a way to offer a set by role. Needs a decision on where the catalogue lives and who approves an entry; connectors are disabled by the policy today |
-| Editing the policy | The Policy page only reads. A change stays a merge request and a deploy until a review decides who may make one from a page |
+| Applying a policy change | The Policy page drafts a patch and stops there. Applying one from a page stays out until a review decides who may |
 | Telemetry | Claude Code's OpenTelemetry export needs a collector, and its interaction with `DISABLE_TELEMETRY` measured first |
 | More than one role | Everyone with the token is an administrator. A read-only viewer needs the server to know who is asking |
 
@@ -424,6 +444,12 @@ purpose and a test must go red.
 
 ## Known limits
 
+- A drafted patch is written against the policy file as the dashboard's host
+  holds it. Where the lists are too short to show lines around a change, the
+  patch is placed by line number alone (`git apply --unidiff-zero`), so on a
+  file that has since changed an added rule can land in the wrong place. The
+  SHA-256 in the patch's first lines says which file it was for; reading the
+  merge request is the check.
 - A stopped call's command is stored and shown as it was written, so a
   credential typed into a command that was then stopped is in the store, in a
   feed batch on its way there, and on the Logs page for everyone with the

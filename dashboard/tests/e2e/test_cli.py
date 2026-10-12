@@ -166,7 +166,9 @@ class Serve(unittest.TestCase):
         self.assertGreaterEqual(len(calls), 9, calls)
         # the one call that is about a thing: ask for a thing the listing names
         first = self.srv.json("/api/docs")["groups"][0]["docs"][0]["id"]
-        args = {"/api/doc": "?id=" + urllib.parse.quote(first), "/api/run": None}
+        draft = json.dumps([{"op": "add", "list": "deny", "rule": "Bash(dd:*)"}])
+        args = {"/api/doc": "?id=" + urllib.parse.quote(first), "/api/run": None,
+                "/api/policy-draft": "?edits=" + urllib.parse.quote(draft)}
         for path in calls:
             if args.get(path, "") is not None:
                 self.assertIsInstance(self.srv.json(path + args.get(path, "")), dict, path)

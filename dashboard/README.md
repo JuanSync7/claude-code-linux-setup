@@ -67,7 +67,8 @@ fixed argument list, working directory and time limit. It ships empty: with
 no entry, the page can start nothing. `runs` is where each run's output is kept
 (`dir`, on local disk, made owner-only) and how many runs back (`keep`). `docs` lists the directories or single
 files of Markdown the Docs page shows, and `policy.source` is the policy file
-the fleet should hold, which the Policy and Hosts pages compare against.
+the fleet should hold, which the Policy and Hosts pages compare against and a
+drafted policy change is written for.
 
 How it works, what it trusts and what is still planned: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

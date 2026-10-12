@@ -27,7 +27,7 @@ import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from fleetdash import actions, api, docs
+from fleetdash import actions, api, docs, draft
 
 WEB = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "web"))
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -242,6 +242,9 @@ def make_server(cfg, token=None, web=WEB):
                     out = api.retention(cfg)
                 elif path == "/api/policy":
                     out = api.policy(cfg)
+                elif path == "/api/policy-draft":
+                    # Refused is a ValueError: the page is told why, as a 400
+                    out = draft.patch(cfg, draft.parse(_str(q, "edits")))
                 elif path == "/api/docs":
                     out = docs.index(cfg)
                 elif path == "/api/doc":

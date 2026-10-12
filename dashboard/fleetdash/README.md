@@ -10,6 +10,7 @@
 | `feed.py` | `feed`: one person's own rows, from a private store, written as one batch file into the spool |
 | `spool.py` | The collector's side of the feed: reads each batch as its file's owner, checks every row, removes the batch once stored |
 | `api.py` | The queries behind the pages: overview, events, sessions, people (and its CSV), hosts, policy, status, and the Admin page's privileged sessions, enrolment and retention |
+| `draft.py` | A policy change as a patch for a merge request: the rules to add or remove, written into the repository's policy file as it is laid out; writes nothing |
 | `docs.py` | The Markdown documents under the configured directories, addressed by their place in the list, never by a path |
 | `actions.py` | The commands the Update page can start: only the config's list, one at a time, time-limited, each run recorded |
 | `server.py` | The HTTP server: login token, Host check, static files from `web/`, and the one POST with its extra checks |
