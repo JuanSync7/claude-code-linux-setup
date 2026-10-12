@@ -145,6 +145,24 @@ class IngestTranscripts(unittest.TestCase):
         with open(self.cfg["store"], "rb") as fh:
             self.assertNotIn(CANARY.encode(), fh.read())
 
+    def test_a_tool_name_that_is_not_a_name_is_neither_remembered_nor_stored(self):
+        # the name is whatever the transcript's owner wrote there
+        names = ["run " + CANARY, "x" * 5000, CANARY + "\u00e9", "", "mcp__some-server__do.it"]
+        recs = []
+        for i, name in enumerate(names):
+            recs.append({"type": "assistant", "uuid": "a%d" % i, "timestamp": "2026-10-01T10:00:00Z",
+                         "message": {"content": [{"type": "tool_use", "id": "t%d" % i, "name": name}]}})
+            recs.append({"type": "user", "uuid": "d%d" % i, "timestamp": "2026-10-01T10:00:01Z",
+                         "toolDenialKind": "permission-rule",
+                         "permissionDecision": {"reasonType": "r\u00e9gle" if i else "rule"},
+                         "message": {"content": [{"type": "tool_result", "tool_use_id": "t%d" % i}]}})
+        self.f.transcript("carol", "p1", "s1", recs)
+        self.run_ingest()
+        got = sorted(rows(self.cfg["store"], "select tool, detail from events where category='denial'"))
+        self.assertEqual(got, [("", ""), ("", ""), ("", ""), ("", "rule"), ("mcp__some-server__do.it", "")])
+        with open(self.cfg["store"], "rb") as fh:
+            self.assertNotIn(CANARY.encode(), fh.read())
+
     def test_an_api_error_says_what_kind_it_was(self):
         self.f.transcript("bob", "p1", "s1", [
             {"type": "assistant", "uuid": "e%d" % i, "timestamp": "2026-10-01T10:00:0%dZ" % i,

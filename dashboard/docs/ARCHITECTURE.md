@@ -130,7 +130,9 @@ A transcript denial the person caused (`user-rejected`, `interrupted`) is
 A block read from a transcript carries three things, none of them the command:
 the kind Claude Code gives it (shown as "Decided by"), the name of the tool it
 stopped, and, where the transcript has one, the reason code (`classifier`,
-`safetyCheck`, `rule`). The tool's name comes from the call the block answers;
+`safetyCheck`, `rule`). A name or a code is kept only when it is short and
+made of the characters names are made of, so a sentence written into either
+field is not stored. The tool's name comes from the call the block answers;
 when that call was read in an earlier run the name is not known and is left
 empty. An API error carries its status and the vendor's error code.
 

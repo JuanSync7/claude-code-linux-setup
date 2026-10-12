@@ -26,6 +26,7 @@ import os
 import pwd
 import re
 import stat
+import string
 import subprocess
 
 from fleetdash import store
@@ -59,7 +60,9 @@ VERSION_TIMEOUT = 15
 # tool calls a transcript reader remembers by id, to name the tool a later
 # block stopped; the block follows its call within a few records
 CALLS_REMEMBERED = 4096
-CODE_MAX = 64
+CODE_MAX = 128
+CODE_CHARS = frozenset(string.ascii_letters + string.digits + "_")
+TOOL_CHARS = CODE_CHARS | frozenset("-.:")
 
 
 def run(cfg, own=None):
@@ -368,10 +371,11 @@ def model_label(model):
     return model
 
 
-def _code(v):
+def _code(v, chars=CODE_CHARS):
     """Whether a field is one of the vendor's short codes (rate_limit,
-    classifier), which are kept, and not a sentence, which is not."""
-    return isinstance(v, str) and v.isidentifier() and len(v) <= CODE_MAX
+    classifier) or, with TOOL_CHARS, a tool's name: those are kept. A
+    sentence, or anything long, is whatever the file's owner wrote and is not."""
+    return isinstance(v, str) and 0 < len(v) <= CODE_MAX and chars.issuperset(v)
 
 
 class _transcript_reader(object):
@@ -444,7 +448,8 @@ class _transcript_reader(object):
         for part in content:
             # the name of the tool only: its input is the person's work
             if (isinstance(part, dict) and part.get("type") == "tool_use"
-                    and isinstance(part.get("id"), str) and isinstance(part.get("name"), str)):
+                    and isinstance(part.get("id"), str) and len(part["id"]) <= CODE_MAX
+                    and _code(part.get("name"), TOOL_CHARS)):
                 self.calls[part["id"]] = part["name"]
                 if len(self.calls) > CALLS_REMEMBERED:
                     self.calls.popitem(last=False)
@@ -456,7 +461,7 @@ class _transcript_reader(object):
             decision = rec.get("permissionDecision") if isinstance(rec.get("permissionDecision"), dict) else {}
             why = decision.get("reasonType") if _code(decision.get("reasonType")) else ""
             rows.append(event(base + "|denial", ts, self.user, session,
-                               "info" if kind in PERSON_DENIALS else "deny", "denial", kind, tool[:DETAIL_MAX], why))
+                               "info" if kind in PERSON_DENIALS else "deny", "denial", kind, tool, why))
         cmd = rec.get("commandRun")
         if isinstance(cmd, dict) and cmd.get("command"):
             # the name only: the rest of the line is the person's arguments
