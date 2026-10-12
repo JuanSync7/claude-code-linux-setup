@@ -125,6 +125,29 @@ for a year: `prune` applies an age limit and a row cap to each.
 A transcript denial the person caused (`user-rejected`, `interrupted`) is
 `info`, not a block. Any other kind, including one never seen before, is `deny`.
 
+### What a block says, and who decided it
+
+A block read from a transcript carries three things, none of them the command:
+the kind Claude Code gives it (shown as "Decided by"), the name of the tool it
+stopped, and, where the transcript has one, the reason code (`classifier`,
+`safetyCheck`, `rule`). The tool's name comes from the call the block answers;
+when that call was read in an earlier run the name is not known and is left
+empty. An API error carries its status and the vendor's error code.
+
+Who decided is told apart this far:
+
+| Decided by | What it is |
+| --- | --- |
+| `automode-blocked`, `automode-unavailable` | Claude Code's own safety check, or that check not answering |
+| `permission-rule` | A `permissions` rule or a built-in safety check. The transcript does not say which settings file held the rule, so a managed-policy rule is not told apart from a person's own |
+| `user-rejected`, `interrupted` | The person; not counted as a block |
+| any other text | What the site's `PermissionDenied` hook was told, on a host that runs it |
+
+A call refused by a `PreToolUse` hook is in neither source: a hook that
+refuses writes no log of its own, and no transcript record has been seen for
+one. On a host that runs the `PermissionDenied` hook and whose transcripts
+are also read, one refusal is counted from both.
+
 ## Who can see it, and who can start a command
 
 Loopback is shared on a multi-user host, so the server is not protected by

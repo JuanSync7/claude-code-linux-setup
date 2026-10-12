@@ -16,6 +16,7 @@ arguments of a command.
 A run also records this host's check-in (its Claude Code version and the hash
 of the policy it holds), and reads the feed spool when one is configured.
 """
+import collections
 import datetime
 import errno
 import glob
@@ -55,6 +56,10 @@ BAD_RECORD = (ValueError, TypeError, KeyError, AttributeError, RecursionError)
 COUNT_MAX = 10 ** 9
 SIZE_MAX = 1 << 40
 VERSION_TIMEOUT = 15
+# tool calls a transcript reader remembers by id, to name the tool a later
+# block stopped; the block follows its call within a few records
+CALLS_REMEMBERED = 4096
+CODE_MAX = 64
 
 
 def run(cfg, own=None):
@@ -363,11 +368,18 @@ def model_label(model):
     return model
 
 
+def _code(v):
+    """Whether a field is one of the vendor's short codes (rate_limit,
+    classifier), which are kept, and not a sentence, which is not."""
+    return isinstance(v, str) and v.isidentifier() and len(v) <= CODE_MAX
+
+
 class _transcript_reader(object):
     def __init__(self, path, user, project):
         self.path, self.user, self.project = path, user, project
         self.session = os.path.basename(path)[:-len(".jsonl")]
         self.records, self.first, self.last = 0, None, None
+        self.calls = collections.OrderedDict()  # tool call id -> tool name
 
     def restart(self, con):
         con.execute("delete from sessions where user=? and path=?", (self.user, self.path))
@@ -418,18 +430,33 @@ class _transcript_reader(object):
                                "%s rejected" % kind))
         if rec.get("isApiErrorMessage") or rec.get("apiErrorStatus"):
             status = rec.get("apiErrorStatus")
+            said = ["HTTP %s" % text(status)] if status else []
+            said += [rec["error"]] if _code(rec.get("error")) else []
             rows.append(event(base + "|api", ts, self.user, session, "error", "api-error", "", "",
-                               "HTTP %s" % text(status) if status else "API error"))
+                               " ".join(said) or "API error"))
         if rec.get("attributionSkill"):
             rows.append(event(base + "|skill", ts, self.user, session, "info", "skill", "", "",
                                rec["attributionSkill"]))
         if rec.get("attributionPlugin"):
             rows.append(event(base + "|plugin", ts, self.user, session, "info", "plugin", "", "",
                                rec["attributionPlugin"]))
+        content = msg.get("content") if isinstance(msg.get("content"), list) else []
+        for part in content:
+            # the name of the tool only: its input is the person's work
+            if (isinstance(part, dict) and part.get("type") == "tool_use"
+                    and isinstance(part.get("id"), str) and isinstance(part.get("name"), str)):
+                self.calls[part["id"]] = part["name"]
+                if len(self.calls) > CALLS_REMEMBERED:
+                    self.calls.popitem(last=False)
         if rec.get("toolDenialKind"):
             kind = text(rec["toolDenialKind"])
+            # a call read in an earlier run is not remembered: its tool is unknown, left empty
+            tool = next((self.calls[part["tool_use_id"]] for part in content if isinstance(part, dict)
+                         and isinstance(part.get("tool_use_id"), str) and part["tool_use_id"] in self.calls), "")
+            decision = rec.get("permissionDecision") if isinstance(rec.get("permissionDecision"), dict) else {}
+            why = decision.get("reasonType") if _code(decision.get("reasonType")) else ""
             rows.append(event(base + "|denial", ts, self.user, session,
-                               "info" if kind in PERSON_DENIALS else "deny", "denial", kind, "", ""))
+                               "info" if kind in PERSON_DENIALS else "deny", "denial", kind, tool[:DETAIL_MAX], why))
         cmd = rec.get("commandRun")
         if isinstance(cmd, dict) and cmd.get("command"):
             # the name only: the rest of the line is the person's arguments

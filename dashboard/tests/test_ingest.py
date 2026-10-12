@@ -116,6 +116,49 @@ class IngestTranscripts(unittest.TestCase):
             ("skill", "info", "", "code-review"),
         ])
 
+    def test_a_block_names_the_tool_it_stopped_and_what_decided_never_the_command(self):
+        def call(uuid, tool_id, name):
+            return {"type": "assistant", "uuid": uuid, "timestamp": "2026-10-01T10:00:00Z",
+                    "message": {"content": [{"type": "text", "text": CANARY},
+                                            {"type": "tool_use", "id": tool_id, "name": name,
+                                             "input": {"command": CANARY}}]}}
+
+        def blocked(uuid, tool_id, kind, **more):
+            return dict({"type": "user", "uuid": uuid, "timestamp": "2026-10-01T10:00:01Z", "toolDenialKind": kind,
+                         "toolUseResult": CANARY,
+                         "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id,
+                                                  "content": CANARY, "is_error": True}]}}, **more)
+
+        self.f.transcript("carol", "p1", "s1", [
+            call("a1", "t1", "Bash"), call("a2", "t2", "Write"),
+            blocked("d1", "t1", "automode-blocked",
+                    permissionDecision={"decision": "reject", "source": "config", "reasonType": "classifier"},
+                    serverClassifierContext={"request": CANARY}),
+            blocked("d2", "t2", "permission-rule", permissionDecision={"decision": "reject", "reasonType": "safetyCheck"}),
+            blocked("d3", "t-never-seen", "permission-rule"),
+            blocked("d4", "t1", "user-rejected", permissionDecision=CANARY),
+        ])
+        self.run_ingest()
+        got = sorted(rows(self.cfg["store"], "select source, tool, detail from events where category='denial'"))
+        self.assertEqual(got, [("automode-blocked", "Bash", "classifier"), ("permission-rule", "", ""),
+                               ("permission-rule", "Write", "safetyCheck"), ("user-rejected", "Bash", "")])
+        with open(self.cfg["store"], "rb") as fh:
+            self.assertNotIn(CANARY.encode(), fh.read())
+
+    def test_an_api_error_says_what_kind_it_was(self):
+        self.f.transcript("bob", "p1", "s1", [
+            {"type": "assistant", "uuid": "e%d" % i, "timestamp": "2026-10-01T10:00:0%dZ" % i,
+             "isApiErrorMessage": True, "message": {"content": [{"type": "text", "text": CANARY}]}, **more}
+            for i, more in enumerate([{"apiErrorStatus": 429, "error": "rate_limit"},
+                                      {"error": "cloud_credential_error"}, {"apiErrorStatus": 400, "error": {"a": 1}},
+                                      {"apiErrorStatus": 500, "error": "said " + CANARY}, {}])])
+        self.run_ingest()
+        got = sorted(rows(self.cfg["store"], "select detail from events where category='api-error'"))
+        self.assertEqual(got, [("API error",), ("HTTP 400",), ("HTTP 429 rate_limit",), ("HTTP 500",),
+                               ("cloud_credential_error",)])
+        with open(self.cfg["store"], "rb") as fh:
+            self.assertNotIn(CANARY.encode(), fh.read())
+
     def test_a_person_saying_no_is_not_a_policy_block_but_an_unknown_kind_is(self):
         self.f.transcript("carol", "p1", "s1", [
             {"type": "user", "uuid": "d%d" % i, "timestamp": "2026-10-01T10:00:0%dZ" % i, "toolDenialKind": k}

@@ -183,13 +183,20 @@ async function overview() {
           h("tbody", {}, o.by_model.map(m => h("tr", {}, h("td", { text: m.model }),
             h("td", { class: "n", text: fmt.tok(m.tokens) }), h("td", { class: "n", text: fmt.usd(m.usd) })))))),
       h("div", {}, h("h2", { text: "Blocked, by who decided" }),
-        bars(o.blocks, "source", "count", r => fmt.n(r.count), "deny"))));
+        bars(o.blocks.map(b => ({ source: decidedBy(b.source), count: b.count })), "source", "count",
+          r => fmt.n(r.count), "deny"))));
 }
 
 // Logs -----------------------------------------------------------------------
 const CAT_LABEL = { "tool-call": "Tool calls", denial: "Blocked", redaction: "Hidden credentials",
   "api-error": "API errors", "rate-limit": "Limit hits", "slash-command": "Slash commands",
   skill: "Skills", plugin: "Plugins", "log-integrity": "Log integrity" };
+
+// Who decided, in a transcript's own words for it. A name that is not here is
+// what the site's denial hook was told, and is shown as it was written.
+const DECIDED_BY = { "automode-blocked": "Claude Code safety check", "automode-unavailable": "Safety check unavailable",
+  "permission-rule": "Permission rule", "user-rejected": "The person said no", interrupted: "The person interrupted" };
+const decidedBy = s => DECIDED_BY[s] || s;
 
 async function loadLogs(append) {
   const L = state.logs;
@@ -222,7 +229,7 @@ async function logs(append) {
       h("td", { class: "ts", text: fmt.ts(e.ts) }), h("td", { text: e.user }),
       hosted ? h("td", { class: e.host ? "" : "muted", text: e.host || "–" }) : null,
       h("td", {}, h("span", { class: "sev " + e.severity, text: e.severity })),
-      h("td", { text: CAT_LABEL[e.category] || e.category }), h("td", { text: e.source }),
+      h("td", { text: CAT_LABEL[e.category] || e.category }), h("td", { title: e.source, text: decidedBy(e.source) }),
       h("td", { text: e.tool }), h("td", { class: "detail", text: e.detail }))))))
     : h("p", { class: "empty", text: "No events match these filters." });
   show(
