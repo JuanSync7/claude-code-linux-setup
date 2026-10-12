@@ -144,6 +144,21 @@ warn() { printf '  WARN   %s\n' "$1"; WARNS=$((WARNS+1)); }
 
 # Every destination this run manages, for the install record and the prune.
 PLACED=()
+# What the install record says of each, for cc-drift.sh to compare the host and
+# the checkout against: a file as "<sha256> <mode> <source> <path>", its source
+# relative to the checkout or "-" for content made here; a directory as
+# "<mode> <owner> <path>"; a timer by name. Tab-separated; the record is
+# written only by a complete apply, so these lists are only filled by one.
+SUMS=(); DIRS=(); TIMERS=()
+TAB=$'\t'
+# record_sum <src> <dst> <mode> - the placed file as the record keeps it.
+record_sum() {
+  local s rel
+  s=$(sha256sum < "$1") || { bad "cannot checksum $1 for the install record"; return 1; }
+  case "$1" in "$SRC"/*) rel=${1#"$SRC"/} ;; *) rel=- ;; esac
+  case "$rel$2" in *"$TAB"*|*$'\n'*) bad "$2: a tab or newline in a path cannot be recorded"; return 1 ;; esac
+  SUMS+=("${s%% *}$TAB$3$TAB$rel$TAB$2")
+}
 
 # The files an apply replaces or removes are copied here first; a complete
 # apply that changed anything turns .next into last. One generation, so the
@@ -211,7 +226,8 @@ place() {
     else
       say "$label already current"
     fi
-    return 0
+    record_sum "$src" "$dst" "$mode"
+    return
   fi
   act "install $label -> $dst ($mode root:root)"
   [ "$DRY" -eq 1 ] && return 0
@@ -243,7 +259,7 @@ place() {
   backup "$dst" || { rm -f "$tmp"; return 1; }
   # rename(2) within one directory is atomic.
   mv -f "$tmp" "$dst" || { rm -f "$tmp"; bad "could not move the new $label into place at $dst"; return 1; }
-  return 0
+  record_sum "$src" "$dst" "$mode"
 }
 
 # place_text <dst> <mode> <label> - place() for content generated here (stdin).
@@ -278,8 +294,10 @@ mkdirmode() {
     fi
   else
     act "create $d ($mode $own)"
-    [ "$DRY" -eq 0 ] && install -d -m "$mode" -o "${own%:*}" -g "${own#*:}" "$d"
+    [ "$DRY" -eq 0 ] && { install -d -m "$mode" -o "${own%:*}" -g "${own#*:}" "$d" || { bad "could not create $d"; return 1; }; }
   fi
+  [ "$DRY" -eq 0 ] && DIRS+=("$mode$TAB$own$TAB$d")
+  return 0
 }
 
 echo "=============================================================="
@@ -596,7 +614,7 @@ echo "[6] Operator scripts"
 # cc-admin-session.sh is NOT in this list: it is the escalation path and is
 # placed only with --with-admin, in [12] below, next to the policy it mounts.
 for s in cc-preflight.sh cc-healthcheck.sh cc-update.sh cc-audit.sh cc-install.sh \
-         cc-version-watch.sh cc-report.sh cc-bump-audit.sh; do
+         cc-version-watch.sh cc-report.sh cc-bump-audit.sh cc-drift.sh; do
   [ -f "$SRC/bin/$s" ] && place "$SRC/bin/$s" "$CC_SBIN/$s" 0750 "$s"
 done
 stop_if_failed
@@ -832,6 +850,7 @@ if [ "$DRY" -eq 0 ]; then
   for t in claude-code-healthcheck.timer claude-code-version-watch.timer claude-code-report.timer; do
     if systemctl enable --now "$t" >/dev/null 2>&1; then
       say "$t enabled"
+      TIMERS+=("$t")
     else
       bad "could not enable $t"
     fi
@@ -858,6 +877,9 @@ else
       echo "source=$SRC"
       echo "applied=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf 'file=%s\n' "${PLACED[@]}"
+      [ "${#SUMS[@]}" -eq 0 ] || printf 'sum=%s\n' "${SUMS[@]}"
+      [ "${#DIRS[@]}" -eq 0 ] || printf 'dir=%s\n' "${DIRS[@]}"
+      [ "${#TIMERS[@]}" -eq 0 ] || printf 'timer=%s\n' "${TIMERS[@]}"
     } > "$CC_ETC/install-record.new" && chmod 0644 "$CC_ETC/install-record.new" &&
       mv -f "$CC_ETC/install-record.new" "$CC_ETC/install-record" &&
       say "recorded commit $SRC_COMMIT and ${#PLACED[@]} files in $CC_ETC/install-record" ||

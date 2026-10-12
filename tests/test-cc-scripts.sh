@@ -4205,6 +4205,184 @@ touch "$FR/fail-reload"; fr_apply "$FR"; rm -f "$FR/fail-reload"
 assert_has "IA11 a failed daemon-reload is reported" "$FR/out" "systemctl daemon-reload failed"
 assert_rc  "IA11 and the apply exits 1" "$(rc)" 1 "$FR/out"
 
+# ================================================================ cc-drift
+head2 "cc-drift.sh"
+
+# DR: the drift report end to end. A real --apply into a fake root writes the
+# install record; the host and the checkout are then changed in each way the
+# report names, and every case reads the JSON report as data. The checkout gets
+# a .git/HEAD so both commits are known and can be compared.
+FRD="$WORK/frd"; fr_setup "$FRD"
+mkdir -p "$FRD/repo/.git" "$FRD/dstub" "$FRD/units"
+DR_COMMIT=0123456789abcdef0123456789abcdef01234567
+echo "$DR_COMMIT" > "$FRD/repo/.git/HEAD"
+# systemctl show answers from $FRD/units/<unit>: an enabled timer unless a case
+# writes otherwise, not-found for a unit with no file, and a failure when told -
+# a failure that still prints an answer, which must not be believed.
+cat > "$FRD/dstub/systemctl" <<SH
+#!/bin/sh
+[ "\$1" = show ] || exit 0
+[ -f "$FRD/systemctl-fails" ] && { printf 'LoadState=loaded\nUnitFileState=enabled\n'; exit 1; }
+for u; do :; done
+if [ -f "$FRD/units/\$u" ]; then cat "$FRD/units/\$u"; else printf 'LoadState=not-found\nUnitFileState=\n'; fi
+SH
+chmod 755 "$FRD/dstub/systemctl"
+for t in claude-code-healthcheck.timer claude-code-version-watch.timer claude-code-report.timer; do
+  printf 'LoadState=loaded\nUnitFileState=enabled\n' > "$FRD/units/$t"
+done
+DRIFT="$FRD/repo/bin/cc-drift.sh"
+dr_run() {   # dr_run [args] - the JSON report in $WORK/dr.json, exit status in $WORK/rc
+  env PATH="$FRD/dstub:$PATH" CC_CONFIG="$FRD/repo/config.sh" CC_REPO="$FRD/repo" \
+      bash "$DRIFT" --json "$@" > "$WORK/dr.json" 2> "$WORK/dr.err"
+  echo $? > "$WORK/rc"
+}
+dr_get() {   # dr_get <key>[.<key>] - a top-level value of the report
+  /usr/bin/python3 -I -c 'import json,sys
+v = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): v = v[k]
+print(v)' "$WORK/dr.json" "$1" 2>/dev/null || echo unreadable
+}
+dr_item() {   # dr_item <path> <field> - one item's field; "none" when no item has that path
+  /usr/bin/python3 -I -c 'import json,sys
+m = [i for i in json.load(open(sys.argv[1]))["items"] if i["path"] == sys.argv[2]]
+print(m[0][sys.argv[3]] if len(m) == 1 else "none" if not m else "duplicate")' "$WORK/dr.json" "$1" "$2" 2>/dev/null || echo unreadable
+}
+dr_others() {   # dr_others <field> <path>... - items other than these whose field is not "same"
+  /usr/bin/python3 -I -c 'import json,sys
+skip = set(sys.argv[3:])
+print(sum(1 for i in json.load(open(sys.argv[1]))["items"]
+          if i["path"] not in skip and i[sys.argv[2]] not in ("same", None, "not from the checkout")))' "$WORK/dr.json" "$@" 2>/dev/null || echo unreadable
+}
+dr_is() {   # dr_is <id> <actual> <expected>
+  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got '$2', expected '$3')"; fi
+}
+SB="$FRD/root/usr/local/sbin"; PD="$FRD/root/etc/profile.d"
+
+fr_apply "$FRD"
+assert_rc "DR1 the fake root applies" "$(rc)" 0 "$FRD/out"
+REC="$FRD/root/etc/claude-code/install-record"
+dr_is "DR1 the record has a checksum for every file it names" \
+  "$(grep -c '^sum=' "$REC")" "$(grep -c '^file=' "$REC")"
+dr_run; CURRENT="$WORK/dr.err"
+assert_rc "DR1 a host just applied has no drift" "$(rc)" 0 "$WORK/dr.err"
+dr_is "DR1 and says so" "$(dr_get verdict)" none
+# a pass over nothing proves nothing: the report must have compared the lot
+if [ "$(dr_get counts.files)" -ge 15 ] 2>/dev/null && [ "$(dr_get counts.directories)" -ge 5 ] 2>/dev/null; then
+  pass "DR1 every placed file and directory was compared ($(dr_get counts.files) files, $(dr_get counts.directories) directories)"
+else
+  fail "DR1 every placed file and directory was compared ($(dr_get counts.files) files, $(dr_get counts.directories) directories)"
+fi
+dr_is "DR1 and the three timers" "$(dr_get counts.timers)" 3
+dr_is "DR1 every item is the same, on the host and in the checkout" "$(dr_others host)/$(dr_others repo)" 0/0
+dr_is "DR1 the commit installed is read from the record" "$(dr_get installed_commit)" "$DR_COMMIT"
+dr_is "DR1 and the checkout's from its .git" "$(dr_get checkout_commit)" "$DR_COMMIT"
+dr_is "DR1 the site config is compared with the checkout's config.sh" \
+  "$(dr_item "$FRD/root/etc/claude-code/config.sh" source)" config.sh
+dr_is "DR1 content the installer writes is not from the checkout" \
+  "$(dr_item "$FRD/root/etc/skel/.claude/settings.json" repo)" "not from the checkout"
+cp "$WORK/dr.json" "$WORK/dr1.json"
+dr_run
+if cmp -s "$WORK/dr.json" "$WORK/dr1.json"; then pass "DR1 a second run reports exactly the same"; else fail "DR1 a second run reports exactly the same"; fi
+
+# DR2-DR7: a host changed by hand in each way at once; each item is named for
+# what happened to it, and nothing else is.
+echo "# a local wish" >> "$PD/claude-code-home.sh"
+chmod 0700 "$SB/cc-audit-hook.sh"
+rm -f "$SB/cc-redact-hook.sh"
+mv "$SB/cc-report.sh" "$WORK/dr-report.sh" && ln -s "$WORK/dr-report.sh" "$SB/cc-report.sh"
+chmod 0755 "$FRD/root/var/log/claude-code/denied"
+printf 'LoadState=loaded\nUnitFileState=disabled\n' > "$FRD/units/claude-code-report.timer"
+rm -f "$FRD/units/claude-code-version-watch.timer"
+dr_run
+assert_rc "DR2 a host changed by hand is drift" "$(rc)" 1 "$WORK/dr.err"
+dr_is "DR2 an edited file is edited"                   "$(dr_item "$PD/claude-code-home.sh" host)" edited
+dr_is "DR3 a file with another mode is mode"           "$(dr_item "$SB/cc-audit-hook.sh" host)" mode
+dr_is "DR4 a deleted file is missing"                  "$(dr_item "$SB/cc-redact-hook.sh" host)" missing
+dr_is "DR5 a file swapped for a link is replaced"      "$(dr_item "$SB/cc-report.sh" host)" replaced
+dr_is "DR6 a directory opened up is mode"              "$(dr_item "$FRD/root/var/log/claude-code/denied" host)" mode
+dr_is "DR7 a disabled timer is not enabled"            "$(dr_item claude-code-report.timer host)" "not enabled"
+dr_is "DR7 a timer systemd no longer knows is missing" "$(dr_item claude-code-version-watch.timer host)" missing
+dr_is "DR2 and nothing else is named" "$(dr_others host "$PD/claude-code-home.sh" "$SB/cc-audit-hook.sh" \
+  "$SB/cc-redact-hook.sh" "$SB/cc-report.sh" "$FRD/root/var/log/claude-code/denied" \
+  claude-code-report.timer claude-code-version-watch.timer)" 0
+dr_is "DR2 the count of host differences is seven" "$(dr_get counts.host_differs)" 7
+dr_run --out "$WORK/dr-out.json"; cp "$WORK/dr.json" "$WORK/dr-stdout.json"
+if cmp -s "$WORK/dr-out.json" "$WORK/dr-stdout.json"; then pass "DR8 --out writes the report printed"; else fail "DR8 --out writes the report printed"; fi
+env PATH="$FRD/dstub:$PATH" CC_CONFIG="$FRD/repo/config.sh" CC_REPO="$FRD/repo" bash "$DRIFT" > "$WORK/dr-text.out" 2>&1
+echo $? > "$WORK/rc"
+assert_rc "DR8 without --json the exit status is the same" "$(rc)" 1 "$WORK/dr-text.out"
+
+# DR9: the next apply puts the host back, and the report agrees.
+rm -f "$SB/cc-report.sh"; mv "$WORK/dr-report.sh" "$SB/cc-report.sh"
+fr_apply "$FRD"
+for t in claude-code-version-watch.timer claude-code-report.timer; do
+  printf 'LoadState=loaded\nUnitFileState=enabled\n' > "$FRD/units/$t"
+done
+dr_run
+assert_rc "DR9 after a re-apply the host has no drift again" "$(rc)" 0 "$WORK/dr.err"
+
+# DR10-DR11: the checkout moves on; the host is unchanged but behind it.
+echo "# a new rule" >> "$FRD/repo/hooks/cc-denied-hook.sh"
+mv "$FRD/repo/profile.d/claude-code-browser.sh" "$WORK/dr-browser.sh"
+dr_run
+assert_rc "DR10 a checkout ahead of the host is drift" "$(rc)" 1 "$WORK/dr.err"
+dr_is "DR10 a source changed since the apply is changed" "$(dr_item "$SB/cc-denied-hook.sh" repo)" changed
+dr_is "DR10 while the installed copy is still as installed" "$(dr_item "$SB/cc-denied-hook.sh" host)" same
+dr_is "DR11 a source the checkout dropped is gone" "$(dr_item "$PD/claude-code-browser.sh" repo)" gone
+dr_is "DR10 the count of checkout differences is two" "$(dr_get counts.checkout_differs)" 2
+dr_run --host-only
+assert_rc "DR12 --host-only does not look at the checkout" "$(rc)" 0 "$WORK/dr.err"
+dr_is "DR12 and says it was not compared" "$(dr_item "$SB/cc-denied-hook.sh" repo)" "not compared"
+mv "$WORK/dr-browser.sh" "$FRD/repo/profile.d/claude-code-browser.sh"
+sed -i '$d' "$FRD/repo/hooks/cc-denied-hook.sh"
+
+# DR13-DR16: when the answer is not known it is never 0 or 1.
+dr_run --repo "$WORK/no-such-checkout"
+assert_rc "DR13 no checkout to compare with cannot tell" "$(rc)" 3 "$WORK/dr.err"
+touch "$FRD/systemctl-fails"; dr_run; rm -f "$FRD/systemctl-fails"
+assert_rc "DR14 a timer systemd cannot be asked about cannot tell" "$(rc)" 3 "$WORK/dr.err"
+dr_is "DR14 and the timer is unknown" "$(dr_item claude-code-report.timer host)" unknown
+cp "$REC" "$WORK/dr-record"
+grep -v '^sum=' "$WORK/dr-record" > "$REC"; dr_run
+assert_rc "DR15 a record written before checksums cannot tell" "$(rc)" 3 "$WORK/dr.err"
+assert_has "DR15 and says to re-apply" "$WORK/dr.err" "re-apply once"
+sed 's/^sum=\([0-9a-f]*\)\t/sum=\1 /' "$WORK/dr-record" > "$REC"; dr_run
+assert_rc "DR15 a malformed record cannot tell" "$(rc)" 3 "$WORK/dr.err"
+# each field is checked, not only their number: a source that climbs out of
+# the checkout would have root read and hash any file on the host
+for bad in 's/^sum=[0-9a-f]\{8\}/sum=zzzzzzzz/' 's/^\(sum=[^\t]*\t\)0[0-7]*\t/\1rw-r--r--\t/' \
+           's/^\(sum=[^\t]*\t[^\t]*\t\)\([a-z]\)/\1..\/..\/\2/' 's/^\(sum=[^\t]*\t[^\t]*\t\)\([a-z]\)/\1\/\2/' \
+           's/^\(sum=.*\t\)\//\1/'; do
+  sed "0,/^sum=/{$bad}" "$WORK/dr-record" > "$REC"
+  if cmp -s "$REC" "$WORK/dr-record"; then fail "DR15 the malformed record fixture changed nothing ($bad)"; continue; fi
+  dr_run; assert_rc "DR15 a record line with a bad field cannot tell ($bad)" "$(rc)" 3 "$WORK/dr.err"
+done
+rm -f "$REC"; dr_run
+assert_rc "DR15 no record cannot tell" "$(rc)" 3 "$WORK/dr.err"
+cp "$WORK/dr-record" "$REC"
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$SB/cc-audit.sh"; dr_run; chmod 0750 "$SB/cc-audit.sh"
+  assert_rc "DR16 a file that cannot be read cannot tell" "$(rc)" 3 "$WORK/dr.err"
+  dr_is "DR16 and the file is unreadable" "$(dr_item "$SB/cc-audit.sh" host)" unreadable
+else
+  skip "DR16 a file that cannot be read cannot tell (root reads every file)"
+fi
+dr_run --out "$WORK/no-such-dir/dr.json"
+assert_rc "DR16 a report that cannot be written is not an answer" "$(rc)" 3 "$WORK/dr.err"
+dr_run --repo "$FRD/repo" --host-only
+assert_rc "DR16 --repo with --host-only is a usage error" "$(rc)" 2 "$WORK/dr.err"
+dr_run --nonsense
+assert_rc "DR16 an unknown argument is a usage error" "$(rc)" 2 "$WORK/dr.err"
+
+# DR17: ownership, which only root can read for every file and change.
+if [ "$(id -u)" -eq 0 ] && getent passwd nobody >/dev/null; then
+  chown nobody "$SB/cc-audit.sh"; dr_run; chown root:root "$SB/cc-audit.sh"
+  dr_is "DR17 a file given to another account is owner" "$(dr_item "$SB/cc-audit.sh" host)" owner
+  dr_is "DR17 and ownership was compared" "$(dr_get owner_checked)" True
+else
+  skip "DR17 a file given to another account is owner (needs root)"
+fi
+
 # ================================================================ cc-repo-perms
 head2 "cc-repo-perms.sh"
 

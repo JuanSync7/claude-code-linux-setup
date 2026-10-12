@@ -156,7 +156,9 @@ renamed into place, so no reader sees it half-written. Files it replaces or remo
 `$CC_LOGDIR/install-backup/last`; a policy edited by hand since the last apply is reported and
 kept there as `hand-edited-*`. A complete apply writes `$CC_ETC/install-record` — the commit it
 came from and every file it placed — and the next apply removes any recorded file the repository
-no longer ships. `--check` prints the deployed commit beside the checkout's.
+no longer ships. `--check` prints the deployed commit beside the checkout's. The record also
+keeps each placed file's checksum, mode and source, each directory's mode and owner, and each
+timer enabled, which is what `cc-drift.sh` compares the host and the checkout against.
 
 ## Configure
 
