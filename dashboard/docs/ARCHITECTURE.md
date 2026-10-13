@@ -387,7 +387,7 @@ dashboard does not make it.
 | Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets. Rules to add or remove are drafted there as a patch for a merge request; the page applies nothing |
 | Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
 | Admin | Who used the privileged session: each start with its end, how long it lasted and its exit code, each refusal with its reason, and the tool calls and blocks logged for that account on that host between the start and the end. Who is sending data: each person as sending, quiet (nothing newer than `idle_days`) or never sent, the hosts their events came from, and the files of theirs that were refused; each host and when it was last heard. How long logs are kept: each result's age limit and row cap, how many rows it holds, and how many the next `prune` would remove. Read-only |
-| Docs | The Markdown documents under the directories the config lists, rendered in the page in three columns: the documents by group on the left, the one being read in the middle, and its sections on the right, where the one the reader has reached is marked. Each section has an address of its own, written as GitHub writes a heading's, so a link to a heading lands on it. A document ends with the one before it and the one after. A link to another listed document opens it; any other relative link stays text |
+| Docs | The Markdown documents under the directories the config lists, rendered in the page in three columns: the documents by group on the left, each directory's own README first and a box above them that keeps only the documents whose name, file or description holds every word typed; the one being read in the middle; and its sections on the right, where the one the reader has reached is marked and a document in parts lists each part's title among them. A title is listed by its name, the part before its first spaced dash, and the rest is said under the title as what the document is for. A block of code has a button that copies it. Each section has an address of its own, written as GitHub writes a heading's, so a link to a heading lands on it. A document ends with the one before it and the one after. A link to another listed document opens it; any other relative link stays text |
 
 Docs are rendered by a small reader in `web/app.js` that covers headings,
 lists, tables, code, quotes, links and emphasis. It builds elements and sets
@@ -529,8 +529,9 @@ purpose and a test must go red.
 - The page's Markdown reader is written for the repository's own documents;
   a document built to be slow to read can stall the tab that opens it.
 - On the Docs page, which section an address marks is covered by a browser
-  test. That the window moves to it, and that the mark follows the reader's
-  scrolling, are not: the test browser prints a page and does not scroll.
+  test. That the window moves to it, that the mark follows the reader's
+  scrolling, and that the section list scrolls to keep the mark in view, are
+  not: the test browser prints a page and does not scroll.
 - With direct ingest, one collector reads one host's files, and lines appended
   to a log after the last ingest and before a rotation are lost with the
   rotated file: rotated copies are not read.

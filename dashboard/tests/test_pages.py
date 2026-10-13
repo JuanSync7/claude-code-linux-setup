@@ -148,8 +148,8 @@ class Docs(unittest.TestCase):
         self.f = Fleet()
         self.dir = os.path.join(self.f.root, "docs")
         os.makedirs(os.path.join(self.dir, "sub"))
-        for name, text in (("B.md", "# Second\n\nbody"), ("A.md", "no heading"), ("sub/C.md", "# Third"),
-                           ("notes.txt", "not a document")):
+        for name, text in (("B.md", "# Second — what it is for\n\nbody"), ("A.md", "no heading"), ("sub/C.md", "# Third"),
+                           ("sub/README.md", "# Not first"), ("notes.txt", "not a document")):
             with open(os.path.join(self.dir, name), "w") as fh:
                 fh.write(text)
         self.single = os.path.join(self.f.root, "GOAL.md")
@@ -168,8 +168,26 @@ class Docs(unittest.TestCase):
     def test_every_markdown_file_is_listed_with_the_title_it_gives_itself(self):
         g = docs.index(self.cfg)["groups"]
         self.assertEqual([(d["id"], d["title"]) for d in g[0]["docs"]],
-                         [("0:A.md", "A.md"), ("0:B.md", "Second"), ("0:sub/C.md", "Third")])
+                         [("0:A.md", "A.md"), ("0:B.md", "Second"), ("0:sub/C.md", "Third"), ("0:sub/README.md", "Not first")])
         self.assertEqual([(d["id"], d["title"]) for d in g[1]["docs"]], [("1:GOAL.md", "The goal")])
+
+    def test_a_title_is_its_name_and_what_follows_its_dash_is_said_apart(self):
+        g = docs.index(self.cfg)["groups"]
+        self.assertEqual([(d["title"], d["about"]) for d in g[0]["docs"][:3]],
+                         [("A.md", ""), ("Second", "what it is for"), ("Third", "")])
+        self.assertEqual({k: docs.read(self.cfg, "0:B.md")[k] for k in ("title", "about")},
+                         {"title": "Second", "about": "what it is for"})
+        # a hyphen or a dash with no space around it is part of the name
+        for heading in ("Pre-flight", "A—B", "Claude Code: one host"):
+            with self.subTest(heading=heading):
+                self.assertEqual(docs.split_title(heading), (heading, ""))
+
+    def test_the_map_of_a_directory_comes_before_the_documents_in_it(self):
+        with open(os.path.join(self.dir, "README.md"), "w") as fh:
+            fh.write("# The map")
+        names = [d["name"] for d in docs.index(self.cfg)["groups"][0]["docs"]]
+        # only the directory's own map leads; a map further down stays in its place
+        self.assertEqual(names, ["README.md", "A.md", "B.md", "sub/C.md", "sub/README.md"])
 
     def test_each_document_says_where_it_is_so_a_link_between_groups_can_be_followed(self):
         g = docs.index(self.cfg)["groups"]
@@ -179,7 +197,7 @@ class Docs(unittest.TestCase):
     def test_a_directory_that_is_not_there_is_said_so(self):
         g = docs.index(self.cfg)["groups"]
         self.assertEqual([(x["label"], x["found"], len(x["docs"])) for x in g],
-                         [("Guides", True, 3), ("Goal", True, 1), ("Gone", False, 0)])
+                         [("Guides", True, 4), ("Goal", True, 1), ("Gone", False, 0)])
 
     def test_every_listed_document_opens(self):
         n = 0
@@ -187,7 +205,7 @@ class Docs(unittest.TestCase):
             for d in g["docs"]:
                 self.assertIn("markdown", docs.read(self.cfg, d["id"]))
                 n += 1
-        self.assertEqual(n, 4)
+        self.assertEqual(n, 5)
 
     def test_only_a_listed_document_can_be_asked_for(self):
         for bad in ("0:../secret.md", "0:notes.txt", "9:A.md", "A.md", "", "0:" + self.secret, "1:../secret.md"):

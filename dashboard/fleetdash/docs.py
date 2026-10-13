@@ -9,6 +9,10 @@ import stat
 
 DOC_MAX = 1 << 20
 SUFFIX = ".md"
+# A directory's own map, listed first: it is where a reader of that directory starts.
+MAP = "README.md"
+# A title written "Name — what it is" is listed by its name; the rest is said under it.
+DASH = " — "
 
 
 def _files(entry):
@@ -25,7 +29,7 @@ def _files(entry):
             full = os.path.join(dirpath, name)
             if name.endswith(SUFFIX) and _regular(full):
                 found.append((os.path.relpath(full, path), full))
-    return found
+    return sorted(found, key=lambda f: f[0] != MAP)
 
 
 def _regular(full):
@@ -47,12 +51,23 @@ def _title(full, fallback):
     return fallback
 
 
+def split_title(title):
+    """(name, what it is): a title cut at its first spaced em dash."""
+    name, _, about = title.partition(DASH)
+    return name.strip(), about.strip()
+
+
+def _named(full, fallback):
+    title, about = split_title(_title(full, fallback))
+    return {"title": title, "about": about}
+
+
 def index(cfg):
     groups = []
     for i, entry in enumerate(cfg["docs"]):
         # path: where a link written in one document points, so the page can
         # tell when that is another listed document
-        docs = [{"id": "%d:%s" % (i, rel), "name": rel, "title": _title(full, rel), "path": os.path.abspath(full)}
+        docs = [dict(_named(full, rel), id="%d:%s" % (i, rel), name=rel, path=os.path.abspath(full))
                 for rel, full in _files(entry)]
         # a directory that is not there is said so, not shown as an empty group
         groups.append({"label": entry["label"], "found": os.path.exists(entry["path"]), "docs": docs})
@@ -73,6 +88,6 @@ def read(cfg, doc_id):
             if os.path.getsize(real) > DOC_MAX:
                 raise ValueError("that document is over %d bytes" % DOC_MAX)
             with open(real, encoding="utf-8", errors="replace") as fh:
-                return {"id": doc_id, "name": rel, "group": entry["label"], "title": _title(real, rel),
-                        "path": os.path.abspath(full), "markdown": fh.read()}
+                return dict(_named(real, rel), id=doc_id, name=rel, group=entry["label"],
+                            path=os.path.abspath(full), markdown=fh.read())
     raise ValueError("no such document")

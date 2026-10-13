@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import unittest
 import urllib.parse
@@ -14,6 +15,32 @@ from fleetdash import server
 
 from tests.e2e.harness import ROOT, Server, at, browser, cli, full_config, populated_fleet, render
 from tests.fixtures import admin_line
+
+
+def scripted(config, root, route, script):
+    """The page at route after script ran once the page was ready: the
+    page's own files with the script added to the end of app.js, served by
+    the server in this process, since a headless browser that only prints
+    the page cannot click or type. The script gets the login token as TOKEN."""
+    web = tempfile.mkdtemp(prefix="web-", dir=root)
+    shutil.rmtree(web)
+    shutil.copytree(os.path.join(ROOT, "web"), web)
+    httpd = server.make_server(dict(cfgmod.load(config), port=0), web=web)
+    with open(os.path.join(web, "app.js"), "a") as fh:
+        fh.write("""
+{ const TOKEN = %s;
+  new MutationObserver((_, o) => {
+    if (main.dataset.state !== "ready") return;
+    o.disconnect();
+    %s
+  }).observe(main, { attributes: true }); }
+""" % (json.dumps(httpd.token), script))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        return render("http://127.0.0.1:%d/#token=%s#%s" % (httpd.server_address[1], httpd.token, route))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 class EveryPageRenders(unittest.TestCase):
@@ -165,6 +192,11 @@ class EveryPageRenders(unittest.TestCase):
         # a document with no sections has no list of them
         self.assertIsNone(self.sections(render(self.srv.url + self.GOAL).dom))
 
+    def test_a_document_in_parts_lists_each_part_after_its_title_among_its_sections(self):
+        nav = re.search(r'<nav class="toc" aria-label="On this page">(.*?)</nav>', render(self.srv.url + self.OTHER).dom, re.S).group(1)
+        self.assertEqual(re.findall(r'<a href="([^"]*)"(?: class="([a-z]+)")?>([^<]*)</a>', nav),
+                         [(self.OTHER + "/part-two", "part", "Part two"), (self.OTHER + "/inside-it", "", "Inside it")])
+
     def test_the_address_of_a_section_opens_its_document_and_marks_the_section(self):
         p = render(self.srv.url + self.GUIDE + "/exit-codes-1")
         self.assertEqual(p.main.get("data-state"), "ready")
@@ -187,6 +219,26 @@ class EveryPageRenders(unittest.TestCase):
         self.assertEqual(pager("#/docs"), [("next", self.OTHER, "Next", "The other page")])
         self.assertEqual(pager(self.OTHER), [("prev", self.GUIDE, "Previous", "Operator guide"), ("next", self.GOAL, "Next", "The goal")])
         self.assertEqual(pager(self.GOAL), [("prev", self.OTHER, "Previous", "The other page")])
+
+    def test_a_title_is_listed_by_its_name_and_the_rest_is_said_under_it(self):
+        p = render(self.srv.url + self.GOAL)
+        self.assertIn('<a href="%s" title="GOAL.md" aria-current="page">The goal</a>' % self.GOAL, p.dom)
+        # the heading keeps the address GitHub gives the whole title
+        self.assertIn('<h2 id="section-the-goal--what-every-change-serves">The goal</h2>'
+                      '<p class="lead">what every change serves</p>', p.dom)
+        # a title with no dash has no line under it
+        self.assertNotIn('class="lead"', render(self.srv.url + self.GUIDE).dom)
+
+    def test_a_block_of_code_has_a_button_that_copies_it(self):
+        p = render(self.srv.url + "#/docs")
+        self.assertIn('<div class="code"><pre><code>make verify</code></pre>'
+                      '<button type="button" class="copy" aria-live="polite">Copy</button></div>', p.dom)
+        self.assertEqual(p.dom.count('class="copy"'), p.dom.count("<pre>"))
+
+    def test_the_list_of_documents_can_be_filtered(self):
+        p = render(self.srv.url + "#/docs")
+        self.assertIn('<input type="search" class="filter" placeholder="Filter documents" aria-label="Filter documents">', p.dom)
+        self.assertIn('<p class="muted nomatch" hidden="">No document matches.</p>', p.dom)
 
     def test_an_address_typed_with_its_slash_as_it_is_still_opens_the_document(self):
         p = render(self.srv.url + "#/docs/0:sub/Other.md")
@@ -448,3 +500,71 @@ new MutationObserver((_, o) => {
         self.assertIn("/etc/motd", text)
         for kept_out in ("SECRET-ROW", "WRITTEN-TEXT", "TYPED-WORDS"):
             self.assertNotIn(kept_out, self.page.dom)
+
+
+
+class DocsByHand(unittest.TestCase):
+    """The Docs page acted on: a filter typed, a copy button pressed with the
+    clipboard taking the text and with it refusing, and the login address
+    opened again in a tab that already has the page."""
+
+    @classmethod
+    def setUpClass(cls):
+        browser()
+        cls.f = populated_fleet()
+        cls.config = full_config(cls.f)
+        cli(cls.config, "ingest")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.f.close()
+
+    def entries(self, dom):
+        """(document's address, shown) for every entry of the list, and (group, shown)."""
+        nav = re.search(r'<nav class="doclist" aria-label="Documents">(.*?)</nav>', dom, re.S).group(1)
+        return (re.findall(r'<a href="([^"]*)"[^>]*?( hidden="")?>', nav),
+                re.findall(r'<p class="group"( hidden="")?>([^<]*)</p>', nav))
+
+    def typed(self, words):
+        return scripted(self.config, self.f.root, "/docs", """
+const box = document.querySelector("input.filter");
+box.value = %s;
+box.dispatchEvent(new Event("input"));""" % json.dumps(words)).dom
+
+    def test_a_filter_keeps_the_documents_whose_name_or_file_holds_it(self):
+        GUIDE, OTHER, GOAL = EveryPageRenders.GUIDE, EveryPageRenders.OTHER, EveryPageRenders.GOAL
+        # (typed, documents left, groups left): a group with nothing left in it goes too
+        for words, shown, groups in (("other", {OTHER}, {"Guides"}), ("GUIDE.MD", {GUIDE}, {"Guides"}),
+                                     ("every change", {GOAL}, {"Goal"}), ("", {GUIDE, OTHER, GOAL}, {"Guides", "Goal"})):
+            with self.subTest(words=words):
+                dom = self.typed(words)
+                links, heads = self.entries(dom)
+                self.assertEqual(len(links), 3)  # a filter that matched nothing would also pass an empty list
+                self.assertEqual({href for href, hidden in links if not hidden}, shown)
+                self.assertEqual({name for hidden, name in heads if not hidden}, groups)
+                self.assertIn('<p class="muted nomatch" hidden="">', dom)
+
+    def test_a_filter_that_matches_nothing_says_so(self):
+        dom = self.typed("no such words")
+        links, _ = self.entries(dom)
+        self.assertEqual([hidden for _, hidden in links], [' hidden=""'] * 3)
+        self.assertIn('<p class="muted nomatch">No document matches.</p>', dom)
+
+    def pressed(self, clipboard):
+        return scripted(self.config, self.f.root, "/docs", """
+navigator.clipboard.writeText = text => { document.body.dataset.copied = text; return %s; };
+document.querySelector("button.copy").click();""" % clipboard).dom
+
+    def test_the_copy_button_says_it_copied_the_block(self):
+        dom = self.pressed("Promise.resolve()")
+        self.assertIn('data-copied="make verify"', dom)
+        self.assertIn('<button type="button" class="copy" aria-live="polite">Copied</button>', dom)
+
+    def test_the_copy_button_says_when_the_clipboard_refused(self):
+        dom = self.pressed('Promise.reject(new Error("denied"))')
+        self.assertIn('<button type="button" class="copy" aria-live="polite">Could not copy</button>', dom)
+
+    def test_the_login_address_opened_again_in_the_same_tab_logs_in_and_goes_to_its_page(self):
+        p = scripted(self.config, self.f.root, "/people", 'location.hash = "#token=" + TOKEN + "#/docs";')
+        self.assertEqual((p.main.get("data-page"), p.main.get("data-at"), p.main.get("data-state")), ("docs", "#/docs", "ready"))
+        self.assertNotIn("token=", p.dom)

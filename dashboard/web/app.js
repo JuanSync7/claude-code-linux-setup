@@ -56,12 +56,16 @@ const fmt = {
 // browser sends that part nowhere. It is kept for this tab, taken out of the
 // address, and sent as a header on every call. It is never a cookie: a
 // browser sends a host's cookies to every port on that host.
+// The address can arrive again in a tab that already has the page, so it is
+// looked for on every change of address, not only on load.
 const TOKEN = "fleetdash-token";
-const arrived = /^#token=([^#]*)(#.*)?$/.exec(location.hash);
-if (arrived) {
+function arrive() {
+  const arrived = /^#token=([^#]*)(#.*)?$/.exec(location.hash);
+  if (!arrived) return;
   sessionStorage.setItem(TOKEN, arrived[1]);
   history.replaceState(null, "", location.pathname + (arrived[2] || "#/overview"));
 }
+arrive();
 const login = () => ({ "X-Fleetdash-Token": encodeURIComponent(sessionStorage.getItem(TOKEN) || "") });
 class Locked extends Error {}
 
@@ -792,7 +796,7 @@ function markdown(src, link, section) {
       const body = [];
       for (i++; i < lines.length && !lines[i].startsWith(m[1]); i++) body.push(lines[i]);
       i++;
-      out.push(h("pre", {}, h("code", { text: body.join("\n") })));
+      out.push(codeBlock(body.join("\n")));
     } else if ((m = /^(#{1,6})\s+(.*?)\s*#*$/.exec(line))) {
       // the page's own headline is the h1, so a document's headings start one level down
       const el = h("h" + Math.min(m[1].length + 1, 6), {}, inl(m[2]));
@@ -817,6 +821,27 @@ function markdown(src, link, section) {
     }
   }
   return out;
+}
+// A block of code, with a button that puts its text on the clipboard and says
+// whether that worked: a browser can refuse, and then the reader selects it by hand.
+function codeBlock(text) {
+  const button = h("button", { type: "button", class: "copy", "aria-live": "polite", text: "Copy" });
+  button.addEventListener("click", () => navigator.clipboard.writeText(text).then(
+    () => { button.textContent = "Copied"; }, () => { button.textContent = "Could not copy"; }));
+  return h("div", { class: "code" }, h("pre", {}, h("code", { text })), button);
+}
+// The list of documents keeps the entries whose name, file or description
+// holds every word typed, and a group with none left goes with them.
+function filterDocs(sets, none, words) {
+  const want = words.toLowerCase().split(/\s+/).filter(Boolean);
+  let any = false;
+  for (const { heads, links } of sets) {
+    for (const [a, find] of links) a.hidden = !want.every(w => find.includes(w));
+    const shown = links.some(([a]) => !a.hidden);
+    for (const p of heads) p.hidden = !shown;
+    any = any || shown;
+  }
+  none.hidden = any;
 }
 // A heading's address is its words the way GitHub writes them, so a link
 // written for the repository's own view lands on the same heading here.
@@ -848,8 +873,14 @@ function docRoute(id, section) {
 // after that whichever heading the reader has scrolled to.
 let onPage = [];  // [section, its entry in the list] for the document shown
 function mark(section) {
-  for (const [name, a] of onPage)
-    name === section ? a.setAttribute("aria-current", "location") : a.removeAttribute("aria-current");
+  for (const [name, a] of onPage) {
+    if (name !== section) { a.removeAttribute("aria-current"); continue; }
+    a.setAttribute("aria-current", "location");
+    // a long list scrolls by itself, so it keeps the marked entry in sight
+    const list = a.parentElement, at = a.getBoundingClientRect(), box = list.getBoundingClientRect();
+    if (at.top < box.top || at.bottom > box.bottom)
+      list.scrollTop += at.top - box.top - list.clientHeight / 3;
+  }
 }
 // Where the window was put for the section an address names. Near the end of
 // a document that section cannot reach the top, so until the reader moves
@@ -884,23 +915,37 @@ async function docs(want) {
   const shown = main.querySelector("article.doc");
   if (shown && shown.dataset.doc === id) return go();
   const doc = id ? await get("/api/doc?id=" + encodeURIComponent(id)) : null;
-  const list = h("nav", { class: "doclist", "aria-label": "Documents" }, idx.groups.map(g => [
-    h("p", { class: "group", text: g.label }),
-    g.found ? null : h("p", { class: "muted", text: "Not found on this host." }),
-    g.docs.map(d => h("a", { href: docRoute(d.id, ""), title: d.name,
-      "aria-current": d.id === id ? "page" : null }, inline(d.title, label => label)))]));
+  const filter = h("input", { type: "search", class: "filter", placeholder: "Filter documents", "aria-label": "Filter documents" });
+  const none = h("p", { class: "muted nomatch", text: "No document matches." });
+  none.hidden = true;
+  const sets = idx.groups.map(g => ({
+    heads: [h("p", { class: "group", text: g.label }), g.found ? null : h("p", { class: "muted", text: "Not found on this host." })].filter(Boolean),
+    links: g.docs.map(d => [h("a", { href: docRoute(d.id, ""), title: d.name, "aria-current": d.id === id ? "page" : null },
+      inline(d.title, label => label)), [d.title, d.about, d.name].join(" ").toLowerCase()])}));
+  const list = h("nav", { class: "doclist", "aria-label": "Documents" }, filter, sets.map(g => [g.heads, g.links.map(([a]) => a)]), none);
+  filter.addEventListener("input", () => filterDocs(sets, none, filter.value));
   if (!doc) return show(head("Docs", "No documents"),
     h("p", { class: "empty", text: "No documents are configured. List Markdown directories under docs in the config." }));
-  // the sections under the document's title, two levels deep; a heading said twice gets a number, as GitHub gives it
+  // the sections under the document's title, two levels deep, and each part of a
+  // document written in parts (a top heading after its title); a heading said
+  // twice gets a number, as GitHub gives it
   const sections = [], taken = new Map();
+  let tops = 0;
   const body = markdown(doc.markdown, docLink(doc, byPath), (text, level) => {
     const base = slug(text), n = taken.get(base) || 0;
     taken.set(base, n + 1);
     const name = n ? base + "-" + n : base;
-    if (level === 2 || level === 3)
-      sections.push({ name, entry: h("a", { href: docRoute(id, name), class: level === 3 ? "sub" : null, text }) });
+    if (level === 1 && tops++ === 0) return name;
+    if (level <= 3)
+      sections.push({ name, entry: h("a", { href: docRoute(id, name), class: { 1: "part", 3: "sub" }[level] || null, text }) });
     return name;
   });
+  // the document's own title is its name, with what follows the dash said under it
+  const top = body.findIndex(el => el.tagName === "H2");
+  if (top >= 0 && doc.about) {
+    body[top].replaceChildren(...inline(doc.title, t => t));
+    body.splice(top + 1, 0, h("p", { class: "lead" }, inline(doc.about, t => t)));
+  }
   const toc = sections.length ? h("nav", { class: "toc", "aria-label": "On this page" },
     h("p", { class: "group", text: "On this page" }),
     sections.map(s => s.entry)) : null;
@@ -949,5 +994,5 @@ function render() {
   main.dataset.state = "loading";
   Promise.all([PAGES[page](decodeURIComponent(rest.join("/"))), frame()]).then(() => { if (main.dataset.page === page) main.dataset.state = "ready"; }, fail);
 }
-window.addEventListener("hashchange", () => { render(); main.focus(); });
+window.addEventListener("hashchange", () => { arrive(); render(); main.focus(); });
 render();

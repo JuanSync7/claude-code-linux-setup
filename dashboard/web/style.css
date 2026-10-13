@@ -204,11 +204,15 @@ tr.record > td { padding: 4px 0 22px; background: var(--paper); border-bottom: 1
 td a { color: var(--blue); text-underline-offset: 2px; white-space: nowrap; }
 
 /* docs: the list of documents beside the one being read */
-.docs { display: grid; grid-template-columns: 200px minmax(0, 1fr) 190px; gap: 36px; border-top: 1px solid var(--rule); padding-top: 20px; }
+.docs { display: grid; grid-template-columns: 216px minmax(0, 1fr) 196px; gap: 40px; border-top: 1px solid var(--rule); padding-top: 20px; }
 .doclist, .toc { display: flex; flex-direction: column; gap: 1px; position: sticky; top: 20px; align-self: start;
-           max-height: calc(100vh - 40px); overflow-y: auto; }
-.doclist .group { margin: 14px 8px 4px; } .doclist .group:first-child { margin-top: 0; }
+           max-height: calc(100vh - 40px); overflow-y: auto; scrollbar-width: thin; }
+.doclist .filter { font: inherit; font-size: 13px; padding: 6px 10px; margin: 0 0 14px; border: 1px solid var(--rule); border-radius: 7px;
+                   background: var(--white); color: var(--ink); width: 100%; }
+.doclist .filter:focus-visible { outline: 2px solid var(--blue); outline-offset: 0; border-color: transparent; }
+.doclist .group { margin: 16px 8px 4px; } .doclist .filter + .group { margin-top: 0; }
 .doclist .muted { margin: 0 8px; font-size: 12px; }
+.doclist .nomatch { margin: 4px 8px; font-size: 13px; }
 .doclist a { padding: 5px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 13px; line-height: 1.35; }
 .doclist a:hover { background: var(--paper); }
 .doclist a[aria-current="page"] { background: var(--paper); font-weight: 600; box-shadow: inset 3px 0 0 var(--blue); }
@@ -217,41 +221,64 @@ td a { color: var(--blue); text-underline-offset: 2px; white-space: nowrap; }
 .toc .group { margin: 0 0 8px; }
 .toc a { padding: 4px 0 4px 12px; border-left: 1px solid var(--rule); color: var(--graphite); text-decoration: none; line-height: 1.35; }
 .toc a.sub { padding-left: 24px; }
+.toc a.part { color: var(--ink); font-weight: 600; margin-top: 10px; } .toc .group + a.part { margin-top: 0; }
 .toc a:hover { color: var(--ink); }
 .toc a[aria-current="location"] { color: var(--ink); border-left-color: var(--blue); }
 .doc [id] { scroll-margin-top: 20px; }
-.pager { display: flex; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--rule); }
-.pager a { display: flex; flex-direction: column; gap: 2px; color: var(--ink); text-decoration: none; font-weight: 550; }
-.pager a:hover { color: var(--blue); }
+/* the next document and the one before, as two places to go */
+.pager { display: flex; justify-content: space-between; gap: 16px; margin-top: 56px; }
+.doc .pager a { display: flex; flex-direction: column; gap: 3px; flex: 0 1 48%; min-width: 0; padding: 12px 16px;
+           border: 1px solid var(--rule); border-radius: 8px; color: var(--ink); text-decoration: none; font-weight: 600; }
+.doc .pager a:hover { border-color: var(--blue); }
 .pager .muted { font-size: 12px; font-weight: 400; }
 .pager .next { margin-left: auto; text-align: right; }
-@media (max-width: 1180px) { .docs { grid-template-columns: 200px minmax(0, 1fr); } .toc { display: none; } }
-.doc { max-width: 76ch; font-size: 15px; line-height: 1.6; min-width: 0; }
-.doc h2 { font-size: 24px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 16px; line-height: 1.25; }
-.doc h3 { font-size: 17px; font-weight: 650; margin: 32px 0 10px; }
-.doc h4, .doc h5, .doc h6 { font-size: 15px; font-weight: 650; margin: 24px 0 8px; }
-.doc p, .doc ul, .doc ol, .doc pre, .doc blockquote, .doc .scroll { margin: 0 0 14px; }
-.doc ul, .doc ol { padding-left: 22px; } .doc li { margin: 3px 0; } .doc li > ul, .doc li > ol { margin: 3px 0 0; }
+@media (max-width: 1280px) { .docs { grid-template-columns: 216px minmax(0, 1fr); } .toc { display: none; } }
+/* prose keeps a reading measure; code and tables may use the whole column */
+.doc { max-width: 1000px; font-size: 15.5px; line-height: 1.65; min-width: 0; }
+.doc > p, .doc > ul, .doc > ol, .doc > blockquote, .doc > h2, .doc > h3, .doc > h4, .doc > h5, .doc > h6 { max-width: 70ch; }
+.doc h2 { font-size: 30px; font-weight: 680; letter-spacing: -0.02em; margin: 0 0 20px; line-height: 1.2; }
+.doc h2 ~ h2 { font-size: 25px; margin: 64px 0 16px; }
+.doc .lead { font-size: 17px; line-height: 1.5; color: var(--graphite); margin: -12px 0 32px; }
+.doc .lead::first-letter { text-transform: uppercase; }
+.doc h3 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 48px 0 12px; line-height: 1.3; }
+.doc h4 { font-size: 16px; font-weight: 650; margin: 32px 0 8px; }
+.doc h5, .doc h6 { font-size: 15px; font-weight: 650; margin: 24px 0 8px; }
+.doc p, .doc ul, .doc ol, .doc .code, .doc blockquote, .doc .scroll { margin: 0 0 16px; }
+.doc ul, .doc ol { padding-left: 22px; } .doc li { margin: 4px 0; } .doc li > ul, .doc li > ol { margin: 4px 0 0; }
 .doc a { color: var(--blue); text-underline-offset: 2px; }
 .doc .nolink { border-bottom: 1px dotted var(--graphite); }
-.doc pre { background: var(--paper); border: 1px solid var(--rule); border-radius: 7px; padding: 12px 14px; overflow-x: auto;
-           font-size: 12.5px; line-height: 1.5; }
-.doc code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.87em; }
-.doc blockquote { border-left: 3px solid var(--rule); padding-left: 14px; color: var(--graphite); }
-.doc hr { border: 0; border-top: 1px solid var(--rule); margin: 24px 0; }
-.doc table { font-size: 14px; } .doc td, .doc th { padding-right: 16px; }
+.doc code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.86em; }
+.doc :not(pre) > code { overflow-wrap: anywhere; }
+/* a block of code, with its copy button showing where a pointer rests on it */
+.doc .code { position: relative; }
+.doc pre { margin: 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+           font-size: 12.5px; line-height: 1.55; scrollbar-width: thin; }
+.doc .copy { position: absolute; top: 7px; right: 7px; font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer;
+             background: var(--white); color: var(--graphite); border: 1px solid var(--rule); border-radius: 6px; }
+.doc .copy:hover { color: var(--ink); }
+@media (hover: hover) { .doc .code .copy { opacity: 0; } .doc .code:hover .copy, .doc .copy:focus-visible { opacity: 1; } }
+/* a quoted block is a callout: the documents open each with its point in bold */
+.doc blockquote { padding: 12px 16px; background: #F4F7FE; border-left: 3px solid var(--blue); border-radius: 0 8px 8px 0; color: var(--ink); }
+.doc blockquote > :last-child { margin-bottom: 0; }
+.doc hr { border: 0; border-top: 1px solid var(--rule); margin: 32px 0; }
+.doc .scroll { border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; scrollbar-width: thin; }
+.doc table { font-size: 14px; line-height: 1.5; }
+.doc th { background: var(--paper); color: var(--ink); font-weight: 600; font-size: 13px; padding: 8px 14px; }
+.doc td { padding: 8px 14px; }
+.doc tbody tr:last-child td { border-bottom: 0; }
 
 @media (max-width: 860px) {
   /* minmax(0, ...): a 1fr track grows to its widest child and the page scrolls sideways */
   body { grid-template-columns: minmax(0, 1fr); align-content: start; }
   .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px; }
-  .group, .foot, .side .planned { display: none; }
+  .side .group, .foot, .side .planned { display: none; }
   td.detail { min-width: 220px; }
   .brand { padding: 6px 10px; width: 100%; }
   main { padding: 20px 16px 48px; }
   .cols, .cols.three { grid-template-columns: minmax(0, 1fr); }
   .docs { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  .doclist { position: static; max-height: 180px; }
+  .doclist { position: static; max-height: 240px; }
+  .doc h2 { font-size: 24px; }
   .bench { grid-template-columns: minmax(0, 1fr); gap: 24px 0; }
   .console { position: static; } .out { height: 44vh; }
   .ages { grid-template-columns: 1fr 1fr; }
