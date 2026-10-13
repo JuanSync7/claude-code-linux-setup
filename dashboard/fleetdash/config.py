@@ -26,6 +26,7 @@ KEYS = {
     "claude_bin": str,             # the claude binary a check-in asks for its version; "" for version unknown
     "policy": dict,                # {deployed, source}: the policy this host holds, and the one the fleet should hold
     "host_stale_hours": int,       # a host not heard from for this long is shown as stale
+    "drift": dict,                 # {report, max_age_hours}: the health check's drift report on this host ("" reads none), and when it is old
     "docs": list,                  # [{label, path}]: directories of documents the Docs page shows
     "actions": list,               # [{id, label, about, argv, cwd, timeout_s}]: the only commands the Update page can run
     "runs": dict,                  # {dir, keep}: where each run's output is kept, and how many runs back
@@ -43,6 +44,7 @@ PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 SHAPES = {
     "feed": {"transcripts": str, "state_dir": str},
     "policy": {"deployed": str, "source": str},
+    "drift": {"report": str, "max_age_hours": int},
     "runs": {"dir": str, "keep": int},
     "install": {"account": str, "python": str, "code_dir": str, "config_file": str, "units_dir": str,
                 "ingest_interval": str, "prune_calendar": str},
@@ -114,6 +116,10 @@ def load(path):
         raise ConfigError("runs.keep must be at least 1")
     if cfg["admin_log"] and not os.path.isabs(cfg["admin_log"]):
         raise ConfigError("admin_log must be an absolute path, or empty to read none")
+    if cfg["drift"]["report"] and not os.path.isabs(cfg["drift"]["report"]):
+        raise ConfigError("drift.report must be an absolute path, or empty to read none")
+    if cfg["drift"]["max_age_hours"] < 1:
+        raise ConfigError("drift.max_age_hours must be at least 1")
     if cfg["host_stale_hours"] < 1:
         raise ConfigError("host_stale_hours must be at least 1")
     u = cfg["under_use"]

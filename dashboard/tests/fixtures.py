@@ -87,6 +87,7 @@ class Fleet(object):
             "claude_bin": "",
             "policy": {"deployed": os.path.join(self.root, "etc", "managed-settings.json"), "source": ""},
             "host_stale_hours": 72,
+            "drift": {"report": "", "max_age_hours": 48},
             "docs": [],
             "actions": [],
             "runs": {"dir": os.path.join(self.root, "runs"), "keep": 20},

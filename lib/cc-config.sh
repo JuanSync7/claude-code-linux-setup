@@ -179,6 +179,7 @@ CC_ADMIN_POLICY="$CC_ETC_ADMIN/managed-settings.json"
 CC_ADMIN_LOG="$CC_LOGDIR/admin.log"
 CC_ACTIVITY_LOG_DIR="$CC_LOGDIR/activity"
 CC_DENIED_LOG_DIR="$CC_LOGDIR/denied"
+CC_DRIFT_REPORT="$CC_LOGDIR/drift.json"     # written by the health check, read by the dashboard's check-in
 CC_STATUSLINE="$CC_SHARE/statusline.sh"
 CC_LOGROTATE_FILE="$CC_LOGROTATE/claude-code"
 

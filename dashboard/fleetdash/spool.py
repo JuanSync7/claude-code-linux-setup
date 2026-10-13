@@ -116,6 +116,8 @@ def _rows(con, lines, head, user, stats):
             # outrank every later check-in the host itself makes
             head["ts"] = min(head["ts"], store.iso(datetime.datetime.utcnow()) + "Z",
                              key=lambda t: t[:19])
+            if head["drift"] is not None:
+                head["drift"]["ts"] = min(head["drift"]["ts"], head["ts"], key=lambda t: t[:19])
             ingest.record_checkin(con, head, user)
     except ingest.Grew:
         # the rows are rolled back, so they are not counted as read either
@@ -169,7 +171,8 @@ def _header(raw):
         raise ValueError("no time")
     return {"host": _name(h.get("host")), "user": _name(h.get("user")), "ts": ts,
             "claude_version": _opt(h.get("claude_version"), VERSION_RE),
-            "policy_sha256": _opt(h.get("policy_sha256"), SHA256_RE)}
+            "policy_sha256": _opt(h.get("policy_sha256"), SHA256_RE),
+            "drift": None if h.get("drift") is None else ingest.drift_check(h["drift"])}
 
 
 def _row(d, user):

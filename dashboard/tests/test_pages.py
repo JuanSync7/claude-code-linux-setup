@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock as mock
 import urllib.error
 import urllib.request
 
@@ -88,6 +89,124 @@ class Hosts(unittest.TestCase):
         self.assertIsNone(ingest.claude_version("/bin/false"))
         self.assertIsNone(ingest.claude_version("/bin/true"))
         self.assertIsNone(ingest.claude_version(""))
+
+
+def drift_item(path, status, host="same", repo="same", kind="file"):
+    return {"kind": kind, "path": path, "source": None, "host": host, "repo": repo, "status": status}
+
+
+def drift_report(verdict="none", items=(), **over):
+    """A report as cc-drift.sh --out writes it."""
+    r = {"verdict": verdict, "record": "/etc/claude-code/install-record", "installed_commit": "a" * 40,
+         "applied": "2026-10-09T08:00:00Z", "checkout": "/repo", "checkout_commit": "b" * 40, "owner_checked": True,
+         "counts": {}, "items": list(items)}
+    r.update(over)
+    return r
+
+
+class Drift(unittest.TestCase):
+    """The drift report the health check leaves on a host, as its check-in
+    carries it to the Hosts page. Only the verdict is decided on; each item's
+    own words are shown as they are."""
+
+    def setUp(self):
+        self.f = Fleet()
+        self.report = os.path.join(self.f.root, "drift.json")
+        self.cfg = cfgmod.load(self.f.config(drift={"report": self.report, "max_age_hours": 48}))
+
+    def tearDown(self):
+        self.f.close()
+
+    def write(self, report, age_hours=1, mode=0o644):
+        with open(self.report, "w") as fh:
+            fh.write(report if isinstance(report, str) else json.dumps(report))
+        os.chmod(self.report, mode)
+        t = time.time() - age_hours * 3600
+        os.utime(self.report, (t, t))
+
+    def drift(self, cfg=None):
+        cfg = cfg or self.cfg
+        ingest.run(cfg)
+        return {r["host"]: r for r in api.hosts(cfg)["rows"]}["test-host"]["drift"]
+
+    def test_a_host_as_installed_says_none_and_lists_nothing(self):
+        self.write(drift_report("none", [drift_item("/a", "same"), drift_item("x.timer", "same", kind="timer")]))
+        d = self.drift()
+        self.assertEqual((d["verdict"], d["stale"], d["items"], d["n_items"]), ("none", False, [], 0))
+        self.assertEqual((d["installed_commit"], d["checkout_commit"]), ("a" * 40, "b" * 40))
+
+    def test_a_host_that_differs_lists_only_what_differs_in_the_reports_words(self):
+        self.write(drift_report("drift", [drift_item("/a", "same"), drift_item("/b", "differs", host="edited"),
+                                          drift_item("/c", "differs", repo="changed")]))
+        d = self.drift()
+        self.assertEqual(d["verdict"], "drift")
+        self.assertEqual([(i["path"], i["host"], i["repo"]) for i in d["items"]],
+                         [("/b", "edited", "same"), ("/c", "same", "changed")])
+        self.assertEqual(d["n_items"], 2)
+
+    def test_a_report_that_cannot_tell_is_unknown_with_its_reason(self):
+        self.write({"verdict": "unknown", "reason": "no install record", "items": []})
+        d = self.drift()
+        self.assertEqual((d["verdict"], d["reason"], d["installed_commit"]), ("unknown", "no install record", None))
+
+    def test_with_no_report_configured_drift_is_not_reported(self):
+        cfg = dict(self.cfg, drift={"report": "", "max_age_hours": 48})
+        self.assertIsNone(self.drift(cfg))
+
+    def test_a_missing_report_is_unknown_not_none(self):
+        d = self.drift()
+        self.assertEqual(d["verdict"], "unknown")
+        self.assertTrue(d["reason"])
+
+    def test_a_report_anyone_else_can_write_is_not_believed(self):
+        self.write(drift_report("none"), mode=0o666)
+        self.assertEqual(self.drift()["verdict"], "unknown")
+
+    def test_a_report_behind_a_link_is_not_followed(self):
+        real = os.path.join(self.f.root, "elsewhere.json")
+        with open(real, "w") as fh:
+            json.dump(drift_report("none"), fh)
+        os.symlink(real, self.report)
+        self.assertEqual(self.drift()["verdict"], "unknown")
+
+    def test_a_file_larger_than_a_report_is_unknown(self):
+        report = json.dumps(drift_report("none"))
+        self.write(report)
+        with mock.patch.object(ingest, "DRIFT_REPORT_MAX", len(report) - 1):
+            self.assertEqual(self.drift()["verdict"], "unknown")
+        self.assertEqual(self.drift()["verdict"], "none")
+
+    def test_a_file_that_is_not_a_report_is_unknown(self):
+        for bad in ("{", "[]", json.dumps(drift_report("fine")), json.dumps(drift_report(installed_commit="zz")),
+                    json.dumps(drift_report("drift", [drift_item("/b", "worse")])),
+                    json.dumps(drift_report("drift", [drift_item(7, "differs")])),
+                    json.dumps(drift_report("drift", [drift_item("/b", "differs", host="x" * 500)]))):
+            with self.subTest(bad=bad[:60]):
+                self.write(bad)
+                self.assertEqual(self.drift()["verdict"], "unknown")
+
+    def test_a_report_older_than_the_limit_is_stale(self):
+        self.write(drift_report("none"), age_hours=49)
+        self.assertTrue(self.drift()["stale"])
+        self.write(drift_report("none"), age_hours=47)
+        self.assertFalse(self.drift()["stale"])
+
+    def test_a_long_list_is_cut_and_its_full_count_kept(self):
+        self.write(drift_report("drift", [drift_item("/f%d" % n, "differs", host="edited") for n in range(ingest.DRIFT_ITEMS_MAX + 5)]))
+        d = self.drift()
+        self.assertEqual((len(d["items"]), d["n_items"]), (ingest.DRIFT_ITEMS_MAX, ingest.DRIFT_ITEMS_MAX + 5))
+
+    def test_an_older_check_in_does_not_replace_a_newer_report(self):
+        con = store.connect(self.cfg)
+        with con:
+            new = ingest.drift_summary(drift_report("drift", [drift_item("/b", "differs", host="edited")]), "2026-10-10T10:00:00Z")
+            old = ingest.drift_summary(drift_report("none"), "2026-10-09T10:00:00Z")
+            ingest.record_checkin(con, {"host": "h", "ts": "2026-10-10T11:00:00Z", "claude_version": None,
+                                        "policy_sha256": None, "drift": new}, "alice")
+            ingest.record_checkin(con, {"host": "h", "ts": "2026-10-09T11:00:00Z", "claude_version": None,
+                                        "policy_sha256": None, "drift": old}, "alice")
+        con.close()
+        self.assertEqual({r["host"]: r for r in api.hosts(self.cfg)["rows"]}["h"]["drift"]["verdict"], "drift")
 
 
 class Policy(unittest.TestCase):

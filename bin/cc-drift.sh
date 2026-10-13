@@ -14,7 +14,9 @@
 #   cc-drift.sh --repo DIR      the same, against another checkout
 #   cc-drift.sh --host-only     the host with its install record alone
 #   cc-drift.sh --json          the report as JSON on stdout
-#   cc-drift.sh --out FILE      also write the JSON report to FILE, replaced whole
+#   cc-drift.sh --out FILE      also write the JSON report to FILE, replaced whole,
+#                               mode 0644; when it cannot tell, a report that
+#                               says unknown and why replaces the last one
 #
 # WHAT IT COMPARES. Each complete apply writes $CC_ETC/install-record: the
 # commit it came from and, for every file it placed, the file's SHA-256, its
@@ -29,6 +31,8 @@
 #               gone, unreadable, or not from the checkout at all (content the
 #               installer writes itself, and a config.sh kept elsewhere).
 # The commit installed and the checkout's commit are reported side by side.
+# Each item carries a status - same, differs or unknown - so a reader such as
+# the dashboard keeps the ones that matter without knowing the words above.
 #
 # WHY IT ONLY READS. The root timer runs this, and the checkout is writable by
 # a whole group: running the checkout's installer or its git as root would run
@@ -54,7 +58,7 @@
 #      unreadable host and a matching one must not produce the same answer.
 #
 # Site values (CC_ETC, CC_REPO) come from config.sh through the loader.
-# Exercised by suite cases DR1-DR16.
+# Exercised by suite cases DR1-DR19, and through the health check by HD1-HD5.
 
 set -uo pipefail
 
@@ -277,6 +281,10 @@ def report():
     unknown = [i for i in items if i["host"] in UNKNOWN_HOST or i["repo"] in UNKNOWN_REPO]
     host = [i for i in items if i["host"] != SAME and i["host"] not in UNKNOWN_HOST]
     repo = [i for i in items if i["repo"] in REPO_DRIFT]
+    # each item's own answer, so a reader keeps the ones that matter without
+    # knowing this script's words for each state
+    for i in items:
+        i["status"] = "unknown" if i in unknown else "differs" if i in host or i in repo else "same"
     verdict = "unknown" if unknown else "drift" if host or repo else "none"
     return {"verdict": verdict, "record": RECORD, "installed_commit": rec["commit"], "applied": rec["applied"],
             "checkout": CHECKOUT or None, "checkout_commit": commit_of(CHECKOUT) if CHECKOUT else None,
@@ -317,16 +325,28 @@ def write_out(path, body):
         raise
 
 
+def cannot_tell(why):
+    """Exit 3, and with --out replace the last report with one that says
+    unknown and why: an old "none" left in place would be read as the answer."""
+    print("cc-drift.sh: cannot tell: %s" % why, file=sys.stderr)
+    if OUT:
+        try:
+            write_out(OUT, json.dumps({"verdict": "unknown", "reason": why, "items": []},
+                                      indent=1, sort_keys=True) + "\n")
+        except OSError as e:
+            print("cc-drift.sh: cannot write the report to %s: %s" % (OUT, e), file=sys.stderr)
+    sys.exit(3)
+
+
 try:
     r = report()
 except CannotTell as e:
-    print("cc-drift.sh: cannot tell: %s" % e, file=sys.stderr)
-    sys.exit(3)
+    cannot_tell(str(e))
 except Exception:
     # an uncaught error would exit 1, which reads as drift found
     import traceback
     traceback.print_exc()
-    sys.exit(3)
+    cannot_tell("cc-drift.sh failed: %s" % sys.exc_info()[0].__name__)
 body = json.dumps(r, indent=1, sort_keys=True) + "\n"
 if OUT:
     try:

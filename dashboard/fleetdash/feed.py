@@ -93,7 +93,9 @@ def _send(own, spool, user):
         header = {"t": "batch", "v": BATCH_VERSION, "host": own["host_label"], "user": user,
                   "ts": me["last_seen"] if me else store.iso(datetime.datetime.utcnow()) + "Z",
                   "claude_version": me["claude_version"] if me else None,
-                  "policy_sha256": me["policy_sha256"] if me else None}
+                  "policy_sha256": me["policy_sha256"] if me else None,
+                  "drift": ingest.stored_drift(con.execute("select * from drift where host=?",
+                                                           (own["host_label"],)).fetchone())}
         sent = {kind: 0 for kind, _ in QUERIES}
         tmp = os.path.join(spool, ".tmp-%s" % secrets.token_hex(8))
         try:

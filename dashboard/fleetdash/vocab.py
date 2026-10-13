@@ -55,6 +55,16 @@ ADMIN_LOG_STATES = (
     "read",
 )
 
+# What cc-drift.sh says of a host as a whole, and of each item it compared.
+# Only these are decided on; the words it uses for how an item differs are
+# shown as they are.
+DRIFT_VERDICTS = (
+    "none",     # every item is as installed, and every source as it was applied from
+    "drift",    # at least one differs
+    "unknown",  # it could not tell, and says why
+)
+DRIFT_STATUSES = ("same", "differs", "unknown")
+
 # Which field of a stopped tool call says what it asked for, in the order the
 # denial hook looks for them. Nothing else of a call's input is kept.
 INPUT_KINDS = ("command", "file_path", "url", "path")

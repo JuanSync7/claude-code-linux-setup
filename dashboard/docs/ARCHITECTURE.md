@@ -94,8 +94,8 @@ What every path has in common:
 4. The outbox is emptied after the rename. A crash in between sends the same
    rows again, and the collector's keys make a row sent twice count once.
 
-A batch starts with a header (`host`, `user`, time, the Claude Code version
-and the SHA-256 of the policy file that host holds) followed by one line per
+A batch starts with a header (`host`, `user`, time, the Claude Code version,
+the SHA-256 of the policy file that host holds, and its drift report) followed by one line per
 row. A batch with a header and no rows is still sent: it is the host's
 check-in, and what the Hosts page is built from. A batch may be at most
 1 GiB; `feed` refuses to send a larger one and keeps its rows.
@@ -107,9 +107,9 @@ remove is not counted again.
 ### Check-ins, and what "behind" means
 
 Every `ingest` and every batch records, per host label: when it was last
-heard from, the version `claude_bin --version` printed, and the hash of
-`policy.deployed`. A value that could not be read is stored as unknown, never
-as a guess. The Hosts page then says:
+heard from, the version `claude_bin --version` printed, the hash of
+`policy.deployed`, and the drift report at `drift.report`. A value that could
+not be read is stored as unknown, never as a guess. The Hosts page then says:
 
 - **quiet**: not heard from for `host_stale_hours`. Its figures stay as they
   were; a quiet host is not a host with no use.
@@ -118,12 +118,28 @@ as a guess. The Hosts page then says:
   config says the fleet should hold. With no source configured, or no hash
   reported, the answer is unknown.
 
+- **install**: what the host's health check last found when `cc-drift.sh`
+  compared the host against its install record: *as installed*, *differs*
+  (each file, setting or timer that differs is listed, in the report's own
+  words), or *cannot tell* with the report's reason. A report older than
+  `drift.max_age_hours` is marked old: it says what was true when the check
+  last ran. A host whose config names no report says *not reported*.
+
 The comparison is of file bytes, so it assumes the control plane's installer
 copies the policy file unchanged.
 
+The drift report is read only when it is a plain file, not behind a link,
+owned by root or by the account `ingest` runs as, and writable by nobody else;
+any other is the word of whoever could write it and reads as *cannot tell*. So
+does a report that is missing, too large or not a report: a host never reads
+as installed for want of an answer. Its time is the file's, because the
+report itself holds none: a second run of `cc-drift.sh` writes the same bytes.
+Only the verdict and each item's status are decided on; the words that say
+how an item differs are shown as the report gives them.
+
 A check-in that arrives in a batch is the sender's word, like everything else
 in a batch: anyone who can write to the spool can check in under any host
-label, with any version and hash. The Hosts page names who reported each row.
+label, with any version, hash and drift report. The Hosts page names who reported each row.
 A time ahead of the collector's clock is stored as the collector's time, so a
 forged check-in cannot outrank the ones the host itself sends later; a forged
 host or version can still make a real host read as older, until someone looks
@@ -383,7 +399,7 @@ dashboard does not make it.
 | Logs | Every event, filtered by person, result, who decided and tool, one tab per category, with the host when the rows carry one. A stopped call's row is clicked to open its record as a row of its own beneath it, across the whole table: what was asked for in full, what Claude was told, and where it happened. The record holds nothing its row already says |
 | Chat storage | Size by age band, by person, and the largest chats |
 | People | Everyone with use or a seat: tokens, API-price equivalent against the seat's cost, active days, last use, five-hour and weekly limit hits, and why someone looks under-used (never used, unused for `idle_days`, under `median_fraction` of the median). The table downloads as CSV, for a report |
-| Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, and its events by result |
+| Hosts | Every host heard from: when, which Claude Code, whether its policy is the fleet's, whether it is as installed, and its events by result; below, what differs from each host's install |
 | Policy | The policy this host holds against the repository's: whether they are the same file, which settings differ, the deny, ask and allow rules, the hooks, the sandbox switch, the minimum version, and the names (never the values) of the environment it sets. Rules to add or remove are drafted there as a patch for a merge request; the page applies nothing |
 | Update | The commands the config lists, each with the command line it will run, its directory, time limit and last result; beside them the chosen run: the command line it was started with, when, how long, its result, and everything it printed, followed while it runs; below, the runs kept, each of which opens the same way |
 | Admin | Who used the privileged session: each start with its end, how long it lasted and its exit code, each refusal with its reason, and the tool calls and blocks logged for that account on that host between the start and the end. Who is sending data: each person as sending, quiet (nothing newer than `idle_days`) or never sent, the hosts their events came from, and the files of theirs that were refused; each host and when it was last heard. How long logs are kept: each result's age limit and row cap, how many rows it holds, and how many the next `prune` would remove. Read-only |

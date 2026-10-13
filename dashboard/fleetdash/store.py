@@ -69,6 +69,19 @@ create table if not exists hosts (
     reported_by    text not null    -- whose run carried the check-in
 );
 
+-- The newest drift report each host's check-in carried: what its health
+-- check found, kept with the check-in that brought it.
+create table if not exists drift (
+    host             text primary key,
+    ts               text not null,   -- when the report was written; a missing one, when it was looked for
+    verdict          text not null,   -- vocab.DRIFT_VERDICTS
+    reason           text not null,   -- why it could not tell; '' otherwise
+    installed_commit text,            -- NULL: not known
+    checkout_commit  text,
+    items            text not null,   -- JSON list of the items that are not the same, cut to ingest.DRIFT_ITEMS_MAX
+    n_items          integer not null -- how many there were before the cut
+);
+
 create table if not exists runs (
     id        integer primary key autoincrement,
     ts        text not null,     -- when it was started

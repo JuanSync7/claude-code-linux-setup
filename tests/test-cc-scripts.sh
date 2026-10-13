@@ -4256,6 +4256,10 @@ print(sum(1 for i in json.load(open(sys.argv[1]))["items"]
 dr_is() {   # dr_is <id> <actual> <expected>
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got '$2', expected '$3')"; fi
 }
+dr_status() {   # dr_status <status> - how many items the report gives that status
+  /usr/bin/python3 -I -c 'import json,sys
+print(sum(1 for i in json.load(open(sys.argv[1]))["items"] if i["status"] == sys.argv[2]))' "$WORK/dr.json" "$1" 2>/dev/null || echo unreadable
+}
 SB="$FRD/root/usr/local/sbin"; PD="$FRD/root/etc/profile.d"
 
 fr_apply "$FRD"
@@ -4273,6 +4277,7 @@ else
   fail "DR1 every placed file and directory was compared ($(dr_get counts.files) files, $(dr_get counts.directories) directories)"
 fi
 dr_is "DR1 and the three timers" "$(dr_get counts.timers)" 3
+dr_is "DR18 every item of a host just applied is the same" "$(dr_status differs)/$(dr_status unknown)" 0/0
 dr_is "DR1 every item is the same, on the host and in the checkout" "$(dr_others host)/$(dr_others repo)" 0/0
 dr_is "DR1 the commit installed is read from the record" "$(dr_get installed_commit)" "$DR_COMMIT"
 dr_is "DR1 and the checkout's from its .git" "$(dr_get checkout_commit)" "$DR_COMMIT"
@@ -4306,6 +4311,7 @@ dr_is "DR2 and nothing else is named" "$(dr_others host "$PD/claude-code-home.sh
   "$SB/cc-redact-hook.sh" "$SB/cc-report.sh" "$FRD/root/var/log/claude-code/denied" \
   claude-code-report.timer claude-code-version-watch.timer)" 0
 dr_is "DR2 the count of host differences is seven" "$(dr_get counts.host_differs)" 7
+dr_is "DR18 each item that differs on the host says so" "$(dr_status differs)/$(dr_status unknown)" 7/0
 dr_run --out "$WORK/dr-out.json"; cp "$WORK/dr.json" "$WORK/dr-stdout.json"
 if cmp -s "$WORK/dr-out.json" "$WORK/dr-stdout.json"; then pass "DR8 --out writes the report printed"; else fail "DR8 --out writes the report printed"; fi
 env PATH="$FRD/dstub:$PATH" CC_CONFIG="$FRD/repo/config.sh" CC_REPO="$FRD/repo" bash "$DRIFT" > "$WORK/dr-text.out" 2>&1
@@ -4330,6 +4336,7 @@ dr_is "DR10 a source changed since the apply is changed" "$(dr_item "$SB/cc-deni
 dr_is "DR10 while the installed copy is still as installed" "$(dr_item "$SB/cc-denied-hook.sh" host)" same
 dr_is "DR11 a source the checkout dropped is gone" "$(dr_item "$PD/claude-code-browser.sh" repo)" gone
 dr_is "DR10 the count of checkout differences is two" "$(dr_get counts.checkout_differs)" 2
+dr_is "DR18 each item that differs in the checkout says so" "$(dr_status differs)" 2
 dr_run --host-only
 assert_rc "DR12 --host-only does not look at the checkout" "$(rc)" 0 "$WORK/dr.err"
 dr_is "DR12 and says it was not compared" "$(dr_item "$SB/cc-denied-hook.sh" repo)" "not compared"
@@ -4342,6 +4349,7 @@ assert_rc "DR13 no checkout to compare with cannot tell" "$(rc)" 3 "$WORK/dr.err
 touch "$FRD/systemctl-fails"; dr_run; rm -f "$FRD/systemctl-fails"
 assert_rc "DR14 a timer systemd cannot be asked about cannot tell" "$(rc)" 3 "$WORK/dr.err"
 dr_is "DR14 and the timer is unknown" "$(dr_item claude-code-report.timer host)" unknown
+dr_is "DR18 each item that cannot be told says so: the three timers" "$(dr_item claude-code-report.timer status)/$(dr_status unknown)" unknown/3
 cp "$REC" "$WORK/dr-record"
 grep -v '^sum=' "$WORK/dr-record" > "$REC"; dr_run
 assert_rc "DR15 a record written before checksums cannot tell" "$(rc)" 3 "$WORK/dr.err"
@@ -4369,6 +4377,17 @@ else
 fi
 dr_run --out "$WORK/no-such-dir/dr.json"
 assert_rc "DR16 a report that cannot be written is not an answer" "$(rc)" 3 "$WORK/dr.err"
+# DR19: a run that cannot tell still replaces the last report, so a reader of
+# the file never takes an old "none" for the answer now.
+dr_run --out "$WORK/dr19.json"; cp "$WORK/dr19.json" "$WORK/dr.json"
+dr_is "DR19 fixture: the report written first says none" "$(dr_get verdict)" none
+mv "$REC" "$WORK/dr19-record"; dr_run --out "$WORK/dr19.json"; mv "$WORK/dr19-record" "$REC"
+assert_rc "DR19 with no record it cannot tell" "$(rc)" 3 "$WORK/dr.err"
+cp "$WORK/dr19.json" "$WORK/dr.json"
+dr_is "DR19 and the report it writes says unknown" "$(dr_get verdict)" unknown
+if [ -n "$(dr_get reason)" ] && [ "$(dr_get reason)" != unreadable ]; then pass "DR19 with the reason"
+else fail "DR19 with the reason (got '$(dr_get reason)')"; fi
+dr_is "DR19 and lists no item" "$(dr_get items)" "[]"
 dr_run --repo "$FRD/repo" --host-only
 assert_rc "DR16 --repo with --host-only is a usage error" "$(rc)" 2 "$WORK/dr.err"
 dr_run --nonsense
@@ -4382,6 +4401,47 @@ if [ "$(id -u)" -eq 0 ] && getent passwd nobody >/dev/null; then
 else
   skip "DR17 a file given to another account is owner (needs root)"
 fi
+
+# HD: the health check runs the drift report and keeps it at CC_DRIFT_REPORT,
+# where the dashboard's check-in reads it. Run as installed, in the fake root,
+# with no endpoint to reach. The fixture leaves other findings, so each case
+# compares the number of findings the run renders with the clean run's: one
+# more is this case's own finding, and nothing else moved.
+fr_apply "$FRD"
+HD_REPORT="$FRD/root/var/log/claude-code/drift.json"
+mkdir -p "$WORK/hd-homes"
+hd_run() {   # hd_run - exit status in $WORK/rc; the findings it counted from hd_issues
+  env PATH="$FRD/dstub:$PATH" CC_CONFIG="$FRD/repo/config.sh" CC_REPO="$FRD/repo" CC_REACH_URLS="" \
+      CC_PASSWD=/dev/null CC_HOME_ROOT="$WORK/hd-homes" CC_REPORT="$WORK/hd.log" CC_METRICS="$WORK/hd.prom" \
+      WORKTMP="$WORK" bash "$SB/cc-healthcheck.sh" > "$WORK/hd.out" 2>&1
+  echo $? > "$WORK/rc"
+}
+hd_issues() {   # the findings gauge of the last run's metrics file
+  /usr/bin/python3 -I -c 'import sys
+v = [l.split()[1] for l in open(sys.argv[1]) if l.split()[:1] == ["claude_code_healthcheck_issues"]]
+print(v[0] if len(v) == 1 else "unreadable")' "$WORK/hd.prom" 2>/dev/null || echo unreadable
+}
+hd_verdict() {   # the verdict of the report the health check left, or "absent"
+  [ -e "$HD_REPORT" ] || { echo absent; return; }
+  /usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$HD_REPORT" 2>/dev/null || echo unreadable
+}
+rm -f "$HD_REPORT"; hd_run; HD0=$(hd_issues)
+dr_is "HD1 a host just applied: the report it keeps says none" "$(hd_verdict)" none
+dr_is "HD1 readable by the dashboard's account" "$(stat -c %a "$HD_REPORT" 2>/dev/null)" 644
+case "$HD0" in ''|*[!0-9]*) fail "HD1 the clean run's findings could be read (got '$HD0')" ;; *) pass "HD1 the clean run's findings could be read" ;; esac
+cp "$PD/claude-code-home.sh" "$WORK/hd-home.sh"; echo "# by hand" >> "$PD/claude-code-home.sh"
+hd_run; cp "$WORK/hd-home.sh" "$PD/claude-code-home.sh"
+dr_is "HD2 a file changed by hand is one more finding" "$(hd_issues)" "$((HD0 + 1))"
+dr_is "HD2 and the report says drift" "$(hd_verdict)" drift
+assert_rc "HD2 and the health check needs attention" "$(rc)" 1 "$WORK/hd.out"
+mv "$REC" "$WORK/hd-record"; hd_run; mv "$WORK/hd-record" "$REC"
+dr_is "HD3 a host whose drift cannot be told is one more finding" "$(hd_issues)" "$((HD0 + 1))"
+dr_is "HD3 and the report says unknown, not the last answer" "$(hd_verdict)" unknown
+mv "$SB/cc-drift.sh" "$WORK/hd-drift.sh"; hd_run; mv "$WORK/hd-drift.sh" "$SB/cc-drift.sh"
+dr_is "HD4 no drift script is one more finding" "$(hd_issues)" "$((HD0 + 1))"
+dr_is "HD4 and no old report is left to be read as today's" "$(hd_verdict)" absent
+hd_run
+dr_is "HD5 put back, the host is as clean as before" "$(hd_issues)/$(hd_verdict)" "$HD0/none"
 
 # ================================================================ cc-repo-perms
 head2 "cc-repo-perms.sh"

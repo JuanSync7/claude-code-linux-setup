@@ -338,13 +338,18 @@ def _version_key(v):
 
 def hosts(cfg, days=30, now=None):
     """One row per host that has checked in: when, which Claude Code, and
-    whether the policy it holds is the one the config says the fleet should.
-    A host that stopped checking in is stale; its figures are not zero."""
+    whether the policy it holds is the one the config says the fleet should,
+    and whether what is installed on it is what was installed (its drift
+    report, None when it never sent one). A host that stopped checking in is
+    stale; its figures are not zero. A drift report older than the drift rule
+    is stale too: it says what was true when the health check last ran."""
     since, stale_before = _since(now, days), _stale_before(cfg, now)
+    drift_before = store.iso(_now(now) - datetime.timedelta(hours=cfg["drift"]["max_age_hours"]))
     expected = ingest.file_sha256(cfg["policy"]["source"])
     con = store.connect(cfg)
     try:
         rows = con.execute("select * from hosts order by host").fetchall()
+        drift = {r["host"]: ingest.stored_drift(r) for r in con.execute("select * from drift")}
         counts = {}
         for r in con.execute("select host, severity, count(*) n from events where ts>=? and host!='' "
                              "group by host, severity", (since,)):
@@ -365,9 +370,17 @@ def hosts(cfg, days=30, now=None):
                     "claude_version": r["claude_version"],
                     "version_behind": bool(r["claude_version"]) and r["claude_version"] != newest,
                     "policy_sha256": r["policy_sha256"], "policy": policy, "reported_by": r["reported_by"],
-                    "events": {s: c.get(s, 0) for s in SEVERITIES}})
-    return {"days": days, "stale_hours": cfg["host_stale_hours"], "expected_policy_sha256": expected,
+                    "events": {s: c.get(s, 0) for s in SEVERITIES},
+                    "drift": _drift_row(drift.get(r["host"]), drift_before)})
+    return {"days": days, "stale_hours": cfg["host_stale_hours"], "drift_max_age_hours": cfg["drift"]["max_age_hours"],
+            "expected_policy_sha256": expected,
             "newest_version": newest, "rows": out}
+
+
+def _drift_row(d, before):
+    if d is None:
+        return None
+    return dict(d, stale=d["ts"][:19] < before)
 
 
 def enrolment(cfg, now=None):

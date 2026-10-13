@@ -406,32 +406,58 @@ function daysSince(ts) {
 
 // Hosts ----------------------------------------------------------------------
 const POLICY_SEV = { current: "pass", differs: "error", unknown: "info" };
+// a host's drift report: what its health check found against its install record
+const DRIFT_SAYS = { none: ["pass", "as installed"], drift: ["error", "differs"], unknown: ["info", "cannot tell"] };
+function driftCell(d) {
+  if (!d) return h("td", { class: "muted", text: "not reported" });
+  const [sev, word] = DRIFT_SAYS[d.verdict];
+  const title = d.verdict === "unknown" ? d.reason
+    : "Installed from " + (d.installed_commit || "an unknown commit").slice(0, 12) + "; the checkout is at " + (d.checkout_commit || "an unknown commit").slice(0, 12) + ".";
+  return h("td", {}, h("span", { class: "sev " + sev, title, text: word }),
+    d.stale ? h("span", { class: "flag bad", title: "Written at " + fmt.ts(d.ts) + " UTC", text: "old report" }) : null);
+}
+function driftList(rows) {
+  const told = rows.filter(x => x.drift && x.drift.verdict !== "none");
+  if (!told.length) return null;
+  return h("section", {}, h("h2", { text: "What differs from the install" }),
+    h("p", { class: "muted", text: "Each file, setting or timer whose state differs from the host's install record, in the words of the host's report: as it is on the host, and as it is in the checkout the record was installed from. cc-install.sh --check on the host says what an apply would change." }),
+    h("div", { class: "scroll" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", { text: "Host" }), h("th", { text: "Path" }), h("th", { text: "On the host" }), h("th", { text: "In the checkout" }))),
+      h("tbody", {}, told.flatMap(x => x.drift.verdict === "unknown"
+        ? [h("tr", {}, h("td", { text: x.host }), h("td", { colspan: 3, class: "muted", text: "Cannot tell: " + x.drift.reason }))]
+        : x.drift.items.map(i => h("tr", {}, h("td", { text: x.host }), h("td", { class: "path", text: i.path }),
+            h("td", { text: i.host || "" }), h("td", { text: i.repo || "" })))
+          .concat(x.drift.n_items > x.drift.items.length
+            ? [h("tr", {}, h("td", { text: x.host }), h("td", { colspan: 3, class: "muted", text: "and " + fmt.n(x.drift.n_items - x.drift.items.length) + " more" }))] : []))))));
+}
 async function hosts() {
   const r = await get("/api/hosts?days=" + state.days);
   const rows = r.rows;
   const figs = h("div", { class: "figs" },
     [["", rows.length, "hosts"], ["error", rows.filter(x => x.stale).length, "quiet"],
      ["deny", rows.filter(x => x.version_behind).length, "on an older Claude Code"],
-     ["error", rows.filter(x => x.policy === "differs").length, "hold another policy"]]
+     ["error", rows.filter(x => x.policy === "differs").length, "hold another policy"],
+     ["error", rows.filter(x => x.drift && x.drift.verdict === "drift").length, "differ from their install"]]
       .map(([cls, v, l]) => h("div", { class: "fig " + (v ? cls : "") }, h("b", { text: fmt.n(v) }), h("span", { text: l }))));
-  const rule = "A host is a machine Claude Code runs on. It is listed once it has checked in. A host is quiet after " + r.stale_hours + " hours without a check-in. Its row is what it last sent, not zero." +
+  const rule = "A host is a machine Claude Code runs on. It is listed once it has checked in. A host is quiet after " + r.stale_hours + " hours without a check-in. Its row is what it last sent, not zero. Install is what its health check last found against its install record; a report older than " + r.drift_max_age_hours + " hours is old." +
     (r.expected_policy_sha256 ? "" : " No repository policy is configured (policy.source), so no host can be compared against one.");
   const table = rows.length ? h("div", { class: "scroll" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", { text: "Host" }), h("th", { text: "Last heard (UTC)" }),
-      h("th", { text: "Claude Code" }), h("th", { text: "Policy" }), h("th", { class: "n", text: "Blocked" }),
+      h("th", { text: "Claude Code" }), h("th", { text: "Policy" }), h("th", { text: "Install" }), h("th", { class: "n", text: "Blocked" }),
       h("th", { class: "n", text: "Errors" }), h("th", { text: "Reported by" }))),
     h("tbody", {}, rows.map(x => h("tr", {}, h("td", { text: x.host }),
       h("td", { class: "ts" }, fmt.ts(x.last_seen), x.stale ? h("span", { class: "flag bad", text: "quiet" }) : null),
       h("td", { class: x.claude_version ? "" : "muted" }, x.claude_version || "unknown",
         x.version_behind ? h("span", { class: "flag", text: "newest is " + r.newest_version }) : null),
       h("td", {}, h("span", { class: "sev " + POLICY_SEV[x.policy], title: x.policy_sha256 || "", text: x.policy })),
+      driftCell(x.drift),
       h("td", { class: "n", text: fmt.n(x.events.deny) }), h("td", { class: "n", text: fmt.n(x.events.error) }),
       h("td", { text: x.reported_by }))))))
     : h("p", { class: "empty", text: "No host has checked in yet. A host checks in when it runs ingest, or when a person's session there sends its usage." });
   show(
     head("Hosts", "Blocked and errors over the last " + r.days + " days", seg([[7, "7d"], [30, "30d"], [90, "90d"]], state.days,
       d => { state.days = d; render(); })),
-    figs, h("section", {}, h("p", { class: "muted", text: rule }), table));
+    figs, h("section", {}, h("p", { class: "muted", text: rule }), table), driftList(rows));
 }
 
 // Admin ----------------------------------------------------------------------

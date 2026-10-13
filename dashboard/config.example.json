@@ -13,6 +13,7 @@
   "claude_bin": "/usr/bin/claude",
   "policy": {"deployed": "/etc/claude-code/managed-settings.json", "source": ""},
   "host_stale_hours": 72,
+  "drift": {"report": "/var/log/claude-code/drift.json", "max_age_hours": 48},
   "docs": [],
   "actions": [],
   "runs": {"dir": "/var/lib/fleetdash/runs", "keep": 50},

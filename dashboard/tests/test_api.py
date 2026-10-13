@@ -53,6 +53,14 @@ class ConfigFailsClosed(unittest.TestCase):
         # with no command nothing is ever kept there
         cfgmod.load(self.f.config(actions=[], runs={"dir": "", "keep": 5}))
 
+    def test_a_drift_report_that_is_not_a_full_path_or_has_no_age_limit_is_refused(self):
+        for bad in ({"report": "drift.json", "max_age_hours": 48}, {"report": "/x/drift.json", "max_age_hours": 0},
+                    {"report": "/x/drift.json"}, {"report": "", "max_age_hours": 48, "x": 1}):
+            with self.assertRaises(cfgmod.ConfigError, msg=bad):
+                cfgmod.load(self.f.config(drift=bad))
+        # empty reads none
+        cfgmod.load(self.f.config(drift={"report": "", "max_age_hours": 48}))
+
     def test_keeping_no_runs_is_refused(self):
         for bad in (0, -1):
             with self.assertRaises(cfgmod.ConfigError, msg=bad):

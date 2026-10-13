@@ -14,8 +14,8 @@ names of the slash command, skill or plugin, never the text of a message. A
 tool call that was stopped is the one exception: it is an incident, and what
 was asked for is kept with it (see incident()).
 
-A run also records this host's check-in (its Claude Code version and the hash
-of the policy it holds), and reads the feed spool and the privileged
+A run also records this host's check-in (its Claude Code version, the hash
+of the policy it holds, and the drift report its health check left), and reads the feed spool and the privileged
 session's log when the config names them.
 """
 import collections
@@ -32,7 +32,7 @@ import string
 import subprocess
 
 from fleetdash import store
-from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES, INPUT_KINDS
+from fleetdash.vocab import ADMIN_KINDS, ADMIN_LOG_STATES, DRIFT_STATUSES, DRIFT_VERDICTS, INPUT_KINDS
 
 CHUNK = 8 << 20
 # no real record comes near this; a longer line is a bad record, not a buffer
@@ -68,6 +68,13 @@ BAD_RECORD = (ValueError, TypeError, KeyError, AttributeError, RecursionError)
 COUNT_MAX = 10 ** 9
 SIZE_MAX = 1 << 40
 VERSION_TIMEOUT = 15
+# a drift report lists every placed file: some tens of kilobytes, so a larger
+# one is not a report, and the items kept are the first of those that differ
+DRIFT_REPORT_MAX = 16 << 20
+DRIFT_ITEMS_MAX = 200
+DRIFT_WORD_MAX = 40
+DRIFT_PATH_MAX = 4096
+COMMIT_RE = re.compile(r"[0-9a-f]{7,64}")
 # tool calls a transcript reader remembers by id, to name the tool a later
 # block stopped; the block follows its call within a few records
 CALLS_REMEMBERED = 4096
@@ -145,7 +152,8 @@ def checkin(cfg, now=None):
     return {"host": cfg["host_label"],
             "ts": store.iso(now or datetime.datetime.utcnow()) + "Z",
             "claude_version": claude_version(cfg["claude_bin"]),
-            "policy_sha256": file_sha256(cfg["policy"]["deployed"])}
+            "policy_sha256": file_sha256(cfg["policy"]["deployed"]),
+            "drift": drift(cfg, now)}
 
 
 # each part is short enough to be read as a number wherever versions are ordered
@@ -181,13 +189,114 @@ def file_sha256(path):
     return h.hexdigest()
 
 
+def drift(cfg, now=None):
+    """The drift report the health check left on this host, as a check-in
+    carries it (see drift_summary), or None when the config names none.
+
+    The report is believed only from root or from this collector's own
+    account, in a plain file nobody else can write: any other is the word of
+    whoever could write it, and is unknown. So is a report that is missing,
+    cannot be read or is not one: never "none" for want of an answer."""
+    path = cfg["drift"]["report"]
+    if not path:
+        return None
+    looked = store.iso(now or datetime.datetime.utcnow()) + "Z"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return _no_drift(looked, "no report at %s: the health check has not run cc-drift.sh here" % path)
+    except OSError as e:
+        return _no_drift(looked, "the report at %s cannot be read: %s" % (path, e.strerror or e))
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        written = store.iso(datetime.datetime.utcfromtimestamp(st.st_mtime)) + "Z"
+        if not stat.S_ISREG(st.st_mode):
+            return _no_drift(looked, "%s is not a plain file" % path)
+        if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022:
+            return _no_drift(written, "%s can be written by an account other than root's, so it is not believed" % path)
+        raw = fh.read(DRIFT_REPORT_MAX + 1)
+    if len(raw) > DRIFT_REPORT_MAX:
+        return _no_drift(written, "%s is larger than a drift report can be" % path)
+    try:
+        return drift_summary(json.loads(raw.decode("utf-8")), written)
+    except BAD_RECORD as e:
+        return _no_drift(written, "%s is not a drift report: %s" % (path, e))
+
+
+def _no_drift(ts, why):
+    return {"ts": ts, "verdict": "unknown", "reason": why[:DETAIL_MAX], "installed_commit": None,
+            "checkout_commit": None, "items": [], "n_items": 0}
+
+
+def drift_summary(report, ts):
+    """What a check-in carries of a report cc-drift.sh wrote at ts: its
+    verdict, why it could not tell, the two commits, and the items whose
+    status is not "same", the first DRIFT_ITEMS_MAX of them."""
+    if not isinstance(report, dict) or not isinstance(report.get("items"), list):
+        raise ValueError("no list of items")
+    for i in report["items"]:
+        if not isinstance(i, dict) or i.get("status") not in DRIFT_STATUSES:
+            raise ValueError("an item with no status")
+    kept = [{k: i.get(k) for k in ("kind", "path", "host", "repo", "status")}
+            for i in report["items"] if i["status"] != "same"]
+    return drift_check({"ts": ts, "verdict": report.get("verdict"), "reason": report.get("reason") or "",
+                        "installed_commit": report.get("installed_commit"),
+                        "checkout_commit": report.get("checkout_commit"),
+                        "items": kept[:DRIFT_ITEMS_MAX], "n_items": len(kept)})
+
+
+def drift_check(d):
+    """d itself if it is a drift summary in every field, else ValueError: a
+    summary from a batch is the sender's word, held to the same rules."""
+    if not isinstance(d, dict) or sorted(d) != sorted(DRIFT_FIELDS):
+        raise ValueError("not a drift summary")
+    if not timestamp(d["ts"]) or d["verdict"] not in DRIFT_VERDICTS:
+        raise ValueError("a drift summary with no time or verdict")
+    if not isinstance(d["reason"], str) or len(d["reason"]) > DETAIL_MAX or not storable(d["reason"]):
+        raise ValueError("a drift reason that is not short text")
+    for c in (d["installed_commit"], d["checkout_commit"]):
+        if c is not None and not (isinstance(c, str) and COMMIT_RE.fullmatch(c)):
+            raise ValueError("not a commit: %r" % (c,))
+    n = count(d["n_items"])
+    if not isinstance(d["items"], list) or len(d["items"]) > min(n, DRIFT_ITEMS_MAX):
+        raise ValueError("more drift items than its count")
+    for i in d["items"]:
+        if not isinstance(i, dict) or sorted(i) != sorted(DRIFT_ITEM_FIELDS) or i["status"] not in DRIFT_STATUSES[1:]:
+            raise ValueError("not a drift item")
+        if not isinstance(i["path"], str) or not 0 < len(i["path"]) <= DRIFT_PATH_MAX or not storable(i["path"]):
+            raise ValueError("a drift item with no path")
+        for k in ("kind", "host", "repo"):
+            if i[k] is not None and not (isinstance(i[k], str) and len(i[k]) <= DRIFT_WORD_MAX and storable(i[k])):
+                raise ValueError("a drift item's %s is not a short word" % k)
+    return d
+
+
+def stored_drift(row):
+    """A drift row from the store as the summary it was stored from."""
+    if row is None:
+        return None
+    d = {k: row[k] for k in DRIFT_FIELDS}
+    d["items"] = json.loads(d["items"])
+    return d
+
+
+DRIFT_FIELDS = ("ts", "verdict", "reason", "installed_commit", "checkout_commit", "items", "n_items")
+DRIFT_ITEM_FIELDS = ("kind", "path", "host", "repo", "status")
+
+
 def record_checkin(con, c, reported_by):
     """Keep the newest check-in per host. An older one arriving late (a batch
-    read out of order) does not replace a newer one."""
+    read out of order) does not replace a newer one. A check-in with no drift
+    report leaves the last one, which ages on the Hosts page."""
     row = con.execute("select last_seen from hosts where host=?", (c["host"],)).fetchone()
     if row is None or c["ts"] >= row["last_seen"]:
         con.execute("insert or replace into hosts values (?,?,?,?,?)",
                     (c["host"], c["ts"], c["claude_version"], c["policy_sha256"], reported_by))
+        d = c.get("drift")
+        if d is not None:
+            con.execute("insert or replace into drift values (?,?,?,?,?,?,?,?)",
+                        (c["host"], d["ts"], d["verdict"], d["reason"], d["installed_commit"], d["checkout_commit"],
+                         json.dumps(d["items"]), d["n_items"]))
 
 
 def _file(con, cfg, path, user, reader, stats, cp_key):

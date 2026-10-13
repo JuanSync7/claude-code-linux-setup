@@ -511,6 +511,30 @@ else
   fi
 fi
 
+# --- 8. Install drift --------------------------------------------------------
+# Whether this host still holds what cc-install.sh --apply put there, and the
+# checkout what it was applied from. cc-drift.sh answers, and its report is
+# kept at CC_DRIFT_REPORT, where the dashboard's check-in reads it. When the
+# script cannot be run the last report is removed, so an old "none" is never
+# read as today's answer; when it runs and cannot tell, it replaces the report
+# with one that says unknown and why.
+echo
+echo "[8] Install drift"
+if [ ! -x "$CC_SBIN/cc-drift.sh" ]; then
+  rm -f "$CC_DRIFT_REPORT"
+  flag "$CC_SBIN/cc-drift.sh is not installed - drift was not checked (cc-install.sh --apply places it)"
+else
+  "$CC_SBIN/cc-drift.sh" --out "$CC_DRIFT_REPORT" 2>&1 | sed 's/^/  /'
+  DRIFT_RC=${PIPESTATUS[0]}
+  case "$DRIFT_RC" in
+    0) note "the host is as installed, and the checkout as it was applied from" ;;
+    1) flag "the host or the checkout differs from what was installed (listed above; cc-install.sh --check says what an apply would change)" ;;
+    3) flag "drift cannot be told (above) - the report at $CC_DRIFT_REPORT says unknown" ;;
+    *) rm -f "$CC_DRIFT_REPORT"
+       flag "cc-drift.sh failed (exit $DRIFT_RC) - drift was not checked" ;;
+  esac
+fi
+
 # --- the Prometheus textfile rendering ---------------------------------------
 # A RENDERING of this run, not a second source of truth. Written atomically,
 # because a half-written file makes node_exporter set node_textfile_scrape_error

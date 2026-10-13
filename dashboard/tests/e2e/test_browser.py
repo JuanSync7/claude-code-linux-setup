@@ -11,7 +11,7 @@ import unittest
 import urllib.parse
 
 from fleetdash import config as cfgmod
-from fleetdash import server
+from fleetdash import ingest, server, store
 
 from tests.e2e.harness import ROOT, Server, at, browser, cli, full_config, populated_fleet, render
 from tests.fixtures import admin_line
@@ -501,6 +501,75 @@ new MutationObserver((_, o) => {
         for kept_out in ("SECRET-ROW", "WRITTEN-TEXT", "TYPED-WORDS"):
             self.assertNotIn(kept_out, self.page.dom)
 
+
+
+class HostsDrift(unittest.TestCase):
+    """The Hosts page with one host in each drift state: as installed, one
+    that differs on the host and in the checkout, one whose health check
+    could not tell, one whose last report is older than the limit, and one
+    that never sent a report."""
+
+    @classmethod
+    def setUpClass(cls):
+        browser()
+        cls.f = populated_fleet()
+        config = cls.f.config(drift={"report": "", "max_age_hours": 48})
+        cfg = cfgmod.load(config)
+        item = lambda path, host, repo, status="differs": {"kind": "file", "path": path, "source": None,
+                                                           "host": host, "repo": repo, "status": status}
+        report = lambda verdict, items=(), **over: dict(
+            {"verdict": verdict, "installed_commit": "a" * 40, "checkout_commit": "b" * 40, "items": list(items)}, **over)
+        con = store.connect(cfg)
+        with con:
+            for host, ts, r in (
+                    ("as-installed", at(0, "00:00"), report("none", [item("/etc/x", "same", "same", "same")])),
+                    ("edited", at(0, "00:00"), report("drift", [item("/usr/local/sbin/cc-audit-hook.sh", "edited", "same"),
+                                                                 item("/etc/profile.d/claude-code-home.sh", "same", "changed")])),
+                    ("cannot-tell", at(0, "00:00"), {"verdict": "unknown", "reason": "no install record", "items": []}),
+                    ("old-report", at(3, "00:00"), report("none")),
+                    ("never", None, None)):
+                ingest.record_checkin(con, {"host": host, "ts": at(0, "00:00"), "claude_version": None, "policy_sha256": None,
+                                            "drift": ingest.drift_summary(r, ts) if r else None}, "root")
+        con.close()
+        cls.srv = Server(config)
+        cls.page = render(cls.srv.url + "#/hosts")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.stop()
+        cls.f.close()
+
+    def row(self, host):
+        m = re.search(r"<tr><td>%s</td>.*?</tr>" % re.escape(host), self.page.dom)
+        self.assertIsNotNone(m, host)
+        return m.group(0)
+
+    def test_each_host_says_whether_it_is_as_installed(self):
+        self.assertIn('<span class="sev pass" title="Installed from aaaaaaaaaaaa; the checkout is at bbbbbbbbbbbb.">as installed</span>',
+                      self.row("as-installed"))
+        self.assertIn('<span class="sev error" title="Installed from aaaaaaaaaaaa; the checkout is at bbbbbbbbbbbb.">differs</span>',
+                      self.row("edited"))
+        self.assertIn('<span class="sev info" title="no install record">cannot tell</span>', self.row("cannot-tell"))
+        self.assertIn('<td class="muted">not reported</td>', self.row("never"))
+
+    def test_a_report_older_than_the_limit_is_marked_old(self):
+        self.assertIn('as installed</span><span class="flag bad" title="Written at %s UTC">old report</span>'
+                      % at(3, "00:00").replace("T", " ")[:16], self.row("old-report"))
+        self.assertNotIn("old report", self.row("as-installed"))
+
+    def test_the_figures_count_the_hosts_that_differ(self):
+        self.assertIn('<div class="fig error"><b>1</b><span>differ from their install</span></div>', self.page.dom)
+
+    def test_what_differs_is_listed_in_the_reports_own_words(self):
+        self.assertIn("What differs from the install", self.page.main_text)
+        self.assertIn('<tr><td>edited</td><td class="path">/usr/local/sbin/cc-audit-hook.sh</td><td>edited</td><td>same</td></tr>',
+                      self.page.dom)
+        self.assertIn('<tr><td>edited</td><td class="path">/etc/profile.d/claude-code-home.sh</td><td>same</td><td>changed</td></tr>',
+                      self.page.dom)
+        self.assertIn('<tr><td>cannot-tell</td><td colspan="3" class="muted">Cannot tell: no install record</td></tr>',
+                      self.page.dom)
+        # a host as installed lists nothing
+        self.assertNotIn("/etc/x", self.page.dom)
 
 
 class DocsByHand(unittest.TestCase):

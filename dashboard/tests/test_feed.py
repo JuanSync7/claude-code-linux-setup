@@ -7,11 +7,14 @@ import sqlite3
 import unittest
 
 from fleetdash import config as cfgmod
-from fleetdash import feed, ingest, spool
+from fleetdash import api, feed, ingest, spool
 from tests.fixtures import CANARY, Fleet, assistant, usage
 
 ME = pwd.getpwuid(os.geteuid()).pw_name
 TS = "2026-10-01T10:00:00Z"
+DRIFT_ITEM = {"kind": "file", "path": "/b", "host": "edited", "repo": "same", "status": "differs"}
+GOOD_DRIFT = {"ts": TS, "verdict": "none", "reason": "", "installed_commit": None, "checkout_commit": None,
+              "items": [], "n_items": 0}
 
 
 def rows(db, sql, *args):
@@ -93,6 +96,23 @@ class Pushed(unittest.TestCase):
         ingest.run(self.collector)
         self.assertEqual(rows(self.db, "select host, reported_by from hosts where host='host-a'"),
                          [("host-a", ME)])
+
+    def test_a_feed_carries_its_hosts_drift_report_as_the_senders_word(self):
+        report = os.path.join(self.f.root, "drift.json")
+        with open(report, "w") as fh:
+            json.dump({"verdict": "drift", "installed_commit": "a" * 40, "checkout_commit": "b" * 40,
+                       "items": [{"kind": "file", "path": "/b", "source": None, "host": "edited",
+                                  "repo": "same", "status": "differs"}]}, fh)
+        feed.run(dict(self.feeder(), drift={"report": report, "max_age_hours": 48}))
+        ingest.run(self.collector)
+        host = {r["host"]: r for r in api.hosts(self.collector)["rows"]}["host-a"]
+        self.assertEqual((host["drift"]["verdict"], [i["path"] for i in host["drift"]["items"]], host["reported_by"]),
+                         ("drift", ["/b"], ME))
+
+    def test_a_feed_with_no_drift_report_leaves_drift_not_reported(self):
+        feed.run(self.feeder())
+        ingest.run(self.collector)
+        self.assertIsNone({r["host"]: r for r in api.hosts(self.collector)["rows"]}["host-a"]["drift"])
 
     def test_a_batch_read_twice_counts_once(self):
         self.use()
@@ -291,7 +311,12 @@ class HostileBatches(unittest.TestCase):
 
     def test_a_file_with_no_valid_header_is_refused(self):
         for i, head in enumerate(({"v": 2}, {"host": ""}, {"ts": "yesterday"}, {"claude_version": "<b>"},
-                                  {"policy_sha256": "abc"}, {"t": "event"})):
+                                  {"policy_sha256": "abc"}, {"t": "event"}, {"drift": "none"},
+                                  {"drift": {"verdict": "fine"}},
+                                  # an item is complete but for its status: a summary lists only what differs
+                                  {"drift": dict(GOOD_DRIFT, n_items=1, items=[dict(DRIFT_ITEM, status="worse")])},
+                                  {"drift": dict(GOOD_DRIFT, n_items=1, items=[dict(DRIFT_ITEM, status="same")])},
+                                  {"drift": dict(GOOD_DRIFT, n_items=0, items=[DRIFT_ITEM])})):
             with self.subTest(head=head):
                 self.batch([self.usage_row()], name="h%d.jsonl" % i, **head)
                 stats = ingest.run(self.cfg)

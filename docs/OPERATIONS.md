@@ -897,6 +897,8 @@ worthless** — the denominator is printed so that a blind run cannot pass silen
 | Stranded home — owner UID does not resolve | A leaver process did not complete | Account provisioning, with a verification step added |
 | Credential file older than 80 days | A login is approaching expiry. A long-running background session that outlives its credential simply stops making progress | Tell the user to `/login` |
 | Sandbox enabled but `bwrap` or `socat` missing | **Urgent.** With `failIfUnavailable: false`, sessions continue with **no sandbox enforcement** and only warn — the host is unprotected while appearing healthy | Reinstall the dependency the same day |
+| `[8] Install drift`: differs | A placed file, setting or timer is not what the install record says was placed: edited on the host, or the checkout has moved on since the last apply. The report is at `$CC_LOGDIR/drift.json`, which the dashboard's Hosts page reads | `sudo cc-install.sh --check` says what an apply would change. Establish who changed a host-side file before re-applying over it |
+| `[8] Install drift`: cannot tell | No install record, or a part of it cannot be read. The report says *unknown* with the reason, never *as installed* | Re-apply to write a record, or fix what the reason names |
 | Disk above 85% on the home volume | Session transcripts and caches accumulating. The largest single consumer is typically `~/.cache/claude-cli-nodejs/`, not transcripts | Reduce `cleanupPeriodDays`, or grow the volume |
 
 ## 4.2 Recurring tasks
