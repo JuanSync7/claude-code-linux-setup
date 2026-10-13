@@ -230,8 +230,9 @@ def browser():
                          % (named or "google-chrome, chromium, chromium-browser"))
 
 
-def render(url, budget_ms=5000):
-    """The DOM after the page's scripts and fetches have run."""
+def render(url, budget_ms=5000, window=None):
+    """The DOM after the page's scripts and fetches have run, in a window of
+    (width, height) pixels when given, Chrome's own size otherwise."""
     exe = browser()
     profile = tempfile.mkdtemp(prefix="fleetdash-browser-")
     args = [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--disable-extensions",
@@ -241,6 +242,8 @@ def render(url, budget_ms=5000):
             "--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-pings",
             "--disable-default-apps", "--disable-domain-reliability",
             "--user-data-dir=" + profile, "--virtual-time-budget=%d" % budget_ms, "--dump-dom", url]
+    if window:
+        args.insert(1, "--window-size=%d,%d" % window)
     if os.geteuid() == 0:
         args.insert(1, "--no-sandbox")  # Chrome refuses to sandbox as root (the CI container)
     try:

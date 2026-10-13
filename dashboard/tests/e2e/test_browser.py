@@ -17,7 +17,7 @@ from tests.e2e.harness import ROOT, Server, at, browser, cli, full_config, popul
 from tests.fixtures import admin_line
 
 
-def scripted(config, root, route, script):
+def scripted(config, root, route, script, window=None):
     """The page at route after script ran once the page was ready: the
     page's own files with the script added to the end of app.js, served by
     the server in this process, since a headless browser that only prints
@@ -37,7 +37,7 @@ def scripted(config, root, route, script):
 """ % (json.dumps(httpd.token), script))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
-        return render("http://127.0.0.1:%d/#token=%s#%s" % (httpd.server_address[1], httpd.token, route))
+        return render("http://127.0.0.1:%d/#token=%s#%s" % (httpd.server_address[1], httpd.token, route), window=window)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -632,6 +632,28 @@ document.querySelector("button.copy").click();""" % clipboard).dom
     def test_the_copy_button_says_when_the_clipboard_refused(self):
         dom = self.pressed('Promise.reject(new Error("denied"))')
         self.assertIn('<button type="button" class="copy" aria-live="polite">Could not copy</button>', dom)
+
+    def widths(self, route, window):
+        """The widths in pixels of the window, <main>, the document and its first paragraph."""
+        p = scripted(self.config, self.f.root, route, """
+const w = el => el ? Math.round(el.getBoundingClientRect().width) : -1;
+document.body.dataset.widths = [innerWidth, w(main), w(document.querySelector("article.doc")),
+                                w(document.querySelector("article.doc > p"))].join(" ");""", window=window)
+        m = re.search(r'data-widths="([-0-9 ]+)"', p.dom)
+        self.assertIsNotNone(m, "the widths were not measured")
+        return [int(v) for v in m.group(1).split()]
+
+    def test_a_document_takes_the_width_of_the_window(self):
+        win, page, doc, para = self.widths("/docs", (2400, 900))
+        self.assertEqual(win, 2400)
+        # the page is the window less the side menu, and the text runs to the document's edge
+        self.assertGreater(page, 2000)
+        self.assertGreater(doc, 1400)
+        self.assertEqual(para, doc)
+
+    def test_every_other_page_keeps_its_width(self):
+        win, page, _, _ = self.widths("/overview", (2400, 900))
+        self.assertEqual((win, page), (2400, 1180))
 
     def test_the_login_address_opened_again_in_the_same_tab_logs_in_and_goes_to_its_page(self):
         p = scripted(self.config, self.f.root, "/people", 'location.hash = "#token=" + TOKEN + "#/docs";')

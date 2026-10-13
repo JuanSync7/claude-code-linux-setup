@@ -233,9 +233,9 @@ td a { color: var(--blue); text-underline-offset: 2px; white-space: nowrap; }
 .pager .muted { font-size: 12px; font-weight: 400; }
 .pager .next { margin-left: auto; text-align: right; }
 @media (max-width: 1280px) { .docs { grid-template-columns: 216px minmax(0, 1fr); } .toc { display: none; } }
-/* prose keeps a reading measure; code and tables may use the whole column */
-.doc { max-width: 1000px; font-size: 15.5px; line-height: 1.65; min-width: 0; }
-.doc > p, .doc > ul, .doc > ol, .doc > blockquote, .doc > h2, .doc > h3, .doc > h4, .doc > h5, .doc > h6 { max-width: 70ch; }
+/* a document takes the whole window: its text, code and tables run to the column's edge */
+main[data-page="docs"] { max-width: none; }
+.doc { font-size: 15.5px; line-height: 1.65; min-width: 0; }
 .doc h2 { font-size: 30px; font-weight: 680; letter-spacing: -0.02em; margin: 0 0 20px; line-height: 1.2; }
 .doc h2 ~ h2 { font-size: 25px; margin: 64px 0 16px; }
 .doc .lead { font-size: 17px; line-height: 1.5; color: var(--graphite); margin: -12px 0 32px; }
