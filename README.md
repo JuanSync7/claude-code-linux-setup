@@ -271,7 +271,7 @@ Three planes, three tools — git moves source, the installer moves source onto 
 checks move nothing:
 
 ```
-  SOURCE  (repo ↔ repo)      personal clone ──push──▶ GitHub ──pull──▶ this checkout
+  SOURCE  (repo ↔ repo)      personal clone ──land──▶ GitHub ──pull──▶ this checkout
   DEPLOY  (repo → host)      sudo bash bin/cc-install.sh --apply   (or: sudo make quickstart)
                                   ▼
                              /etc/claude-code, /usr/local/sbin, /usr/local/share, systemd
@@ -382,10 +382,11 @@ stanza or sudoers drop-in whose paths or contact disagree with the config (`lib/
 a version bump cannot land unrecorded, and neither can a pin that is dropped or that differs between
 the fleet and admin policies; and refuses an executable script that has neither test cases
 nor a recorded reason for having none (`tests/test-cc-scripts.sh --coverage`, which derives the map
-from the suite rather than from a table someone maintains); and holds four couplings no other
+from the suite rather than from a table someone maintains); and holds the couplings no other
 check sees — every systemd unit in each installer list, one mount-table predicate behind the
 `CC_MOUNTINFO` seam, no copy of the pin in a script, a `tests/README.md` row for every test file,
-and live `OPERATIONS.md` Part 7 sections behind every skill. A check whose own Python crashes fails
+live `OPERATIONS.md` Part 7 sections behind every skill, and a `main` ruleset that requires
+every gating job. A check whose own Python crashes fails
 rather than reporting what it never examined. The checks iterate `git ls-files` rather
 than fixed lists, so a file added next month is covered the day it lands. `CC_CI_ONLY=<n>` runs a
 single check, which is how the test suite exercises them against scratch repos.
@@ -409,6 +410,31 @@ cannot fabricate skips with its reason (`tests/README.md`, In CI).
 GitLab note: `.gitlab-ci.yml` does nothing until a docker-executor runner is registered on the
 instance. Pipelines stuck at "pending" forever is the symptom of a missing runner, not a broken
 config.
+
+### Landing on main
+
+On GitHub, `main` is guarded by the ruleset in **`.github/rulesets/main.json`**: it cannot be
+deleted or force-pushed, and a commit reaches it only after the gating `ci.yml` jobs have passed on
+that commit. Check [14] holds the ruleset's list of required checks equal to the gating jobs (every job
+without `continue-on-error`). No one is exempt, administrators included.
+
+A commit lands with **`bin/cc-land.sh`**, run in the clone whose `HEAD` should become `main`:
+
+```bash
+bin/cc-land.sh                 # push HEAD to land/<hash>, open its pull request, wait, fast-forward main
+bin/cc-land.sh --rules         # once per repository, and after editing the ruleset: apply it
+```
+
+It pushes `HEAD` to a `land/` branch and opens a pull request, so CI runs on that exact commit.
+Once every check `main` requires has passed, it fast-forwards `main` to the commit and deletes the
+branch, and GitHub marks the pull request merged. GitHub's merge buttons would write a new commit
+instead (squash, rebase or merge commit). The public template's clone and each host's install
+record name commits by hash, so `main` moves only to the commit the checks ran on. The script
+refuses a `HEAD` that does not descend from `main`, a failed, cancelled or skipped required
+check, and a `main` that requires no checks at all. A check that never reports is a timeout
+(exit 3), never a pass. A rerun reuses the open pull request, and once `main` is `HEAD` it changes
+nothing. Exit codes are in the script's header. Every landed commit runs CI twice, once on the
+pull request and once on the push to `main`, and both count against the account's Actions minutes.
 
 Also check before relying on it: on a **private** repository, GitHub secret scanning and push
 protection have historically required a paid add-on rather than being on by default. Confirm it is

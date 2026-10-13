@@ -103,7 +103,9 @@ bin/cc-publish.sh --scan [--map FILE]          # scan the tracked files of the c
 7. **Commit** into `DIR` (cloned from `--remote` when absent, else `git init`) as `--author`.
    There is no fallback to the git identity of the machine: that identity is the site's.
    An unchanged tree makes no commit.
-8. **Push** to `origin main` only when `--push` is given.
+8. **Land** on `origin main` only when `--push` is given, through `bin/cc-land.sh`: the commit goes
+   up on a `land/` branch with a pull request, and `main` fast-forwards to it once the checks the
+   public repository's ruleset requires have passed on it ([`README.md`](../README.md), Landing on main).
 
 Any refusal stops before the commit. When step 6 fails, the last lines of the failing run are
 printed and the whole output is kept in a file the refusal names.
@@ -111,7 +113,7 @@ printed and the whole output is kept in a file the refusal names.
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Published; or the tree was unchanged and nothing needed committing; or, with `--scan`, no denied term was found |
-| `1` | Refused: a deny hit, a secret, a document naming an unpublished record, a failed verification, or nothing to publish — nothing was committed. Or `--push` failed: the commit stays in `DIR`, unpushed, and the same command pushes it |
+| `1` | Refused: a deny hit, a secret, a document naming an unpublished record, a failed verification, or nothing to publish — nothing was committed. Or `--push` did not land: a required check failed or never finished, or the push was refused. The commit stays in `DIR`, and the same command tries again |
 | `2` | Could not run: wrong arguments, not inside a git clone, or a site map that is missing, readable by others, not JSON, or has no deny terms |
 
 ## 4. The CI scan of the public repository
@@ -145,4 +147,4 @@ git -C ~/pub/<public-repo> show --stat HEAD                                  # r
 bin/cc-publish.sh --out ~/pub/<public-repo> --author "Name <email>" --push   # same tree, now pushed
 ```
 
-The second run finds the tree unchanged, commits nothing, and pushes the reviewed commit.
+The second run finds the tree unchanged, commits nothing, and lands the reviewed commit.

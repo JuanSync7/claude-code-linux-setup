@@ -41,6 +41,10 @@ how this checkout is worked; `GOAL.md` is why.
 - **`bash bin/cc-ci-check.sh` must exit 0.** CI runs the identical script on
   every GitLab push and, on GitHub, on pushes to `main` and on pull requests;
   a red `main` is a stop-the-line defect.
+- **On GitHub, `main` moves only through `bin/cc-land.sh`.** The ruleset
+  refuses a commit whose required checks have not passed. Never use the pull
+  request's merge buttons: they write a new commit, and the hash the checks
+  ran on is the hash that must land (README, *Landing on main*).
 - **`bash tests/test-cc-scripts.sh` must exit 0** when a change touches a
   script, a hook or the suite: CI runs it as a gating job too, as root in a
   Rocky 8 container, so a case that only fails as root still turns `main` red.

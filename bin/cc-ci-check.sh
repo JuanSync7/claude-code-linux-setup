@@ -683,6 +683,28 @@ for f in skills:
         print(f"{f} cites the `{r}` row, which OPERATIONS §7.2 does not have")
     if "§7.2" in t and f.split("/")[2] not in runs:
         print(f"{f} cites §7.2 as its contract, but §7.2 has no `{f.split('/')[2]}` row")
+
+# (f) the ruleset guarding main requires exactly the ci.yml jobs that gate: a
+# gating job it omits can fail and the commit still lands; a name no job has
+# never reports, and every landing waits for it until it times out.
+jobs = re.search(r"^jobs:\n(.*)", open(".github/workflows/ci.yml").read(), re.M | re.S)
+parts = re.split(r"^  ([\w-]+):[ \t]*\n", jobs.group(1), flags=re.M) if jobs else []
+gating = {n for n, body in zip(parts[1::2], parts[2::2])
+          if not re.search(r"^    continue-on-error:[ \t]*true\b", body, re.M)}
+try:
+    rs = json.load(open(".github/rulesets/main.json"))
+    req = {c["context"] for r in rs["rules"] if r["type"] == "required_status_checks"
+           for c in r["parameters"]["required_status_checks"]}
+except (OSError, ValueError, KeyError, TypeError) as e:
+    req = None
+    print(f".github/rulesets/main.json cannot be read as a ruleset ({e.__class__.__name__}: {e})")
+if not gating:
+    print(".github/workflows/ci.yml: no gating jobs found - this check no longer sees them")
+elif req is not None:
+    for j in sorted(gating - req):
+        print(f".github/rulesets/main.json does not require the gating ci.yml job {j} - it could fail and the commit still land")
+    for j in sorted(req - gating):
+        print(f".github/rulesets/main.json requires {j}, which is no gating ci.yml job - every landing would wait for it")
 PY
 ); RC14=$?
 if [ "$RC14" -ne 0 ]; then
@@ -690,7 +712,7 @@ if [ "$RC14" -ne 0 ]; then
 elif [ -n "$OUT14" ]; then
   while IFS= read -r m; do bad "$m"; done <<< "$OUT14"
 else
-  ok "systemd units are in all four installer lists, the mount-table predicate is shared, no pin is copied, tests/ is mapped, skills cite live Part 7 sections"
+  ok "systemd units are in all four installer lists, the mount-table predicate is shared, no pin is copied, tests/ is mapped, skills cite live Part 7 sections, main requires every gating CI job"
 fi
 fi
 

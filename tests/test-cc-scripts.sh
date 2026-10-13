@@ -1542,6 +1542,7 @@ mk_ci14() {  # mk_ci14 <dir> - a scratch repo with the real installer, units, ma
   cp "$REPOROOT/docs/REPO-MAP.md" "$REPOROOT/docs/OPERATIONS.md" "$1/docs/"
   cp "$REPOROOT/tests/README.md" "$1/tests/"; : > "$1/tests/test-cc-scripts.sh"; : > "$1/tests/cc-e2e.sh"
   cp "$REPOROOT/.github/workflows/ci.yml" "$1/.github/workflows/"; cp "$REPOROOT/.gitlab-ci.yml" "$1/"
+  mkdir -p "$1/.github/rulesets"; cp "$REPOROOT/.github/rulesets/main.json" "$1/.github/rulesets/"
   git -C "$1" add -A >/dev/null 2>&1
 }
 run_ci14() { local out="$WORK/ci14.$RANDOM.out"
@@ -1592,6 +1593,13 @@ R="$WORK/ci14h"; mk_ci14 "$R"
 sed -i 's/^| `log-review` |/| `logs-review` |/' "$R/docs/OPERATIONS.md"
 O=$(run_ci14 "$R")
 assert_has "C43 renaming the 7.2 row a skill cites fails" "$O" "cites the \`log-review\` row, which OPERATIONS §7.2 does not have"
+R="$WORK/ci14i"; mk_ci14 "$R"
+sed -i '/"context": "dashboard-browser"/d; s/{"context": "dashboard", "integration_id": 15368},/{"context": "dashboard", "integration_id": 15368}/' "$R/.github/rulesets/main.json"
+O=$(run_ci14 "$R")
+assert_has "C45 a gating CI job main does not require fails" "$O" "does not require the gating ci.yml job dashboard-browser"
+sed -i 's/"context": "dashboard",/"context": "shellcheck",/' "$R/.github/rulesets/main.json"
+O=$(run_ci14 "$R")
+assert_has "C45 a required check that is no gating job fails - a job that may fail is not one" "$O" "requires shellcheck, which is no gating ci.yml job"
 O="$WORK/ci44.out"
 ( cd "$R" && CC_CI_ONLY=99 bash "$REPOROOT/bin/cc-ci-check.sh" ) >"$O" 2>&1
 assert_rc  "C44 an unknown check id is a usage error" "$?" 2 "$O"
@@ -4643,6 +4651,157 @@ for entry in '"just a sentence"' '{"meaning": "m"}' '{"example": "v"}' '{"meanin
 done
 
 # ================================================================ cc-publish
+head2 "cc-land.sh"
+# GitHub is played by a bare repository and a stub gh. The clone's remote URL
+# is GitHub-shaped - the script derives owner/repo from it - and git's
+# insteadOf sends every fetch and push to the bare repository instead.
+LAND="$SCRIPTS/cc-land.sh"
+LGH="$WORK/landgh"; mkdir -p "$LGH/bin"
+cat > "$LGH/bin/gh" <<'STUB'
+#!/bin/bash
+# every call is logged; answers come from files under $LGH
+printf '%s\n' "$*" >> "$LGH/log"
+case "$1 $2" in
+  "api repos/acme/widget/rules/branches/main") cat "$LGH/rules" ;;
+  "api repos/acme/widget/rulesets")
+    case " $* " in *" -X "*) exit "${STUB_RULES_RC:-0}" ;; *) cat "$LGH/rulesets" ;; esac ;;
+  "api repos/acme/widget/rulesets/"*) exit "${STUB_RULES_RC:-0}" ;;
+  "pr list")
+    if [ -s "$LGH/pr" ]; then
+      printf '[{"number": 7, "headRefOid": "%s"}]\n' "$(git -C "$LGH/remote.git" rev-parse "refs/heads/$(cat "$LGH/pr")")"
+    else echo '[]'; fi ;;
+  "pr create")
+    while [ $# -gt 0 ]; do [ "$1" = --head ] && printf '%s' "$2" > "$LGH/pr"; shift; done ;;
+  "pr checks")
+    # checks.1, checks.2, ...: one per poll, the last one repeats
+    n=$(( $(cat "$LGH/polls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$LGH/polls"
+    f="$LGH/checks.$n"; [ -e "$f" ] || f=$(ls "$LGH"/checks.* 2>/dev/null | sort -t. -k2 -n | tail -1)
+    [ -n "$f" ] && [ -s "$f" ] || { echo "no checks reported on the 'land' branch" >&2; exit 1; }
+    cat "$f"; exit "${STUB_CHECKS_RC:-0}" ;;
+  *) echo "stub gh: unexpected call: $*" >&2; exit 64 ;;
+esac
+STUB
+chmod +x "$LGH/bin/gh"
+GHURL="https://github.com/acme/widget.git"
+REQ2='[{"type": "deletion"}, {"type": "pull_request", "parameters": {"required_approving_review_count": 0}}, {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "checks"}, {"context": "test-suite"}]}}]'
+GREEN='[{"name": "checks", "bucket": "pass"}, {"name": "test-suite", "bucket": "pass"}, {"name": "shellcheck", "bucket": "fail"}]'
+# mk_land: a fresh remote with one commit on main, a clone of it one commit
+# ahead, the stub's state cleared, and two required checks
+mk_land() {
+  rm -rf "$LGH/remote.git" "$LGH/clone" "$LGH"/checks.* "$LGH/pr" "$LGH/polls" "$LGH/log"
+  git init -q --bare "$LGH/remote.git"
+  git -C "$LGH/remote.git" symbolic-ref HEAD refs/heads/main  # as on GitHub; a clone checks it out
+  git init -q "$LGH/clone"
+  git -C "$LGH/clone" remote add origin "$GHURL"
+  git -C "$LGH/clone" config url."$LGH/remote.git".insteadOf "$GHURL"
+  printf 'one\n' > "$LGH/clone/f"; git -C "$LGH/clone" add f
+  git -C "$LGH/clone" -c user.name=t -c user.email=t@example.org commit -qm one
+  git -C "$LGH/clone" push -q origin HEAD:refs/heads/main
+  printf 'two\n' > "$LGH/clone/f"
+  git -C "$LGH/clone" -c user.name=t -c user.email=t@example.org commit -qam "the change to land"
+  printf '%s\n' "$REQ2" > "$LGH/rules"
+  : > "$LGH/log"
+}
+run_land() {  # run_land <args...> - output file path; exit code in $WORK/rc
+  local out="$WORK/land.$RANDOM.out"
+  ( cd "$LGH/clone" && LGH="$LGH" PATH="$LGH/bin:$PATH" bash "$LAND" --interval 0 --timeout 5 "$@" ) >"$out" 2>&1
+  echo $? > "$WORK/rc"; echo "$out"
+}
+remote_main() { git -C "$LGH/remote.git" rev-parse -q --verify refs/heads/main; }
+clone_head() { git -C "$LGH/clone" rev-parse HEAD; }
+
+# --- LD1-LD3: what it refuses before touching anything
+mk_land
+O=$(run_land --timeout soon)
+assert_rc    "LD1 a --timeout that is not a number of seconds is a usage error" "$(rc)" 2 "$O"
+mkdir -p "$LGH/nogh"
+for t in git python3 sleep dirname; do ln -sf "$(command -v "$t")" "$LGH/nogh/$t"; done
+O="$WORK/land.nogh.out"
+( cd "$LGH/clone" && PATH="$LGH/nogh" "$BASH" "$LAND" ) >"$O" 2>&1; echo $? > "$WORK/rc"
+assert_rc    "LD2 no gh on PATH is a could-not-run" "$(rc)" 2 "$O"
+git -C "$LGH/clone" remote set-url origin "https://gitlab.example.org/acme/widget.git"
+O=$(run_land)
+assert_rc    "LD3 a remote that is not GitHub is a could-not-run" "$(rc)" 2 "$O"
+assert_rc    "LD3 and gh was never asked anything" "$(wc -l < "$LGH/log")" 0 "$LGH/log"
+
+# --- LD4-LD5: green checks land HEAD on main by fast-forward; a rerun is a no-op
+mk_land
+printf '[]\n' > "$LGH/checks.1"; printf '%s\n' "$GREEN" > "$LGH/checks.2"
+O=$(run_land)
+assert_rc    "LD4 green required checks land the commit" "$(rc)" 0 "$O"
+[ "$(remote_main)" = "$(clone_head)" ] \
+  && pass "LD4 the remote's main is HEAD itself - same hash, a fast-forward" || fail "LD4 the remote's main is not HEAD"
+assert_rc    "LD4 it kept polling while no check had reported" "$(cat "$LGH/polls" 2>/dev/null || echo 0)" 2 "$O"
+assert_rc    "LD4 one pull request was opened" "$(grep -c '^pr create' "$LGH/log")" 1 "$LGH/log"
+assert_rc    "LD4 the land branch is deleted" "$(git -C "$LGH/remote.git" for-each-ref refs/heads/land | wc -l)" 0 "$O"
+assert_lacks "LD4 a failing check main does not require does not block" "$O" "shellcheck"
+assert_has   "LD4 it names the checks it waits for" "$O" "waits for the required checks: checks, test-suite"
+: > "$LGH/log"
+O=$(run_land)
+assert_rc    "LD5 a rerun once main is HEAD exits 0" "$(rc)" 0 "$O"
+assert_lacks "LD5 and opens no second pull request" "$LGH/log" "pr create"
+
+# --- LD6-LD9: anything short of every required check passing leaves main where it was
+mk_land; BEFORE=$(remote_main)
+printf '[{"name": "checks", "bucket": "pass"}, {"name": "test-suite", "bucket": "fail"}]\n' > "$LGH/checks.1"
+O=$(run_land)
+assert_rc    "LD6 a failed required check refuses" "$(rc)" 1 "$O"
+assert_has   "LD6 and names it" "$O" "test-suite"
+[ "$(remote_main)" = "$BEFORE" ] && pass "LD6 main did not move" || fail "LD6 main moved after a failed check"
+mk_land; BEFORE=$(remote_main)
+printf '[{"name": "checks", "bucket": "pass"}, {"name": "test-suite", "bucket": "skipping"}]\n' > "$LGH/checks.1"
+O=$(run_land)
+assert_rc    "LD7 a skipped required check is not a pass" "$(rc)" 1 "$O"
+[ "$(remote_main)" = "$BEFORE" ] && pass "LD7 main did not move" || fail "LD7 main moved after a skipped check"
+mk_land; BEFORE=$(remote_main)
+printf '[{"name": "checks", "bucket": "pass"}]\n' > "$LGH/checks.1"
+O=$(run_land --timeout 0)
+assert_rc    "LD8 a required check that never reports is a timeout, not a pass" "$(rc)" 3 "$O"
+[ "$(remote_main)" = "$BEFORE" ] && pass "LD8 main did not move" || fail "LD8 main moved with a check missing"
+printf '%s\n' "$GREEN" > "$LGH/checks.9"
+O=$(run_land)
+assert_rc    "LD8 run again once the checks pass, it lands" "$(rc)" 0 "$O"
+assert_rc    "LD8 through the pull request the first run opened" "$(grep -c '^pr create' "$LGH/log")" 1 "$LGH/log"
+mk_land; BEFORE=$(remote_main)
+O=$(run_land --timeout 0)
+assert_rc    "LD8 no checks reported at all is a timeout too" "$(rc)" 3 "$O"
+mk_land; BEFORE=$(remote_main)
+printf '[{"type": "deletion"}]\n' > "$LGH/rules"; printf '%s\n' "$GREEN" > "$LGH/checks.1"
+O=$(run_land)
+assert_rc    "LD9 a main that requires no checks refuses - nothing would gate the landing" "$(rc)" 1 "$O"
+[ "$(remote_main)" = "$BEFORE" ] && pass "LD9 main did not move" || fail "LD9 main moved with no required checks"
+
+# --- LD10: HEAD that does not descend from the remote's main is never pushed
+mk_land
+git -C "$LGH/clone" reset -q --hard HEAD~1
+printf 'other\n' > "$LGH/clone/g"; git -C "$LGH/clone" add g
+git -C "$LGH/clone" -c user.name=t -c user.email=t@example.org commit -qm other
+git -C "$LGH/clone" push -q origin HEAD:refs/heads/main
+git -C "$LGH/clone" reset -q --hard HEAD~1
+printf 'three\n' > "$LGH/clone/f"; git -C "$LGH/clone" -c user.name=t -c user.email=t@example.org commit -qam diverged
+BEFORE=$(remote_main); : > "$LGH/log"; printf '%s\n' "$GREEN" > "$LGH/checks.1"
+O=$(run_land)
+assert_rc    "LD10 a HEAD that is not a fast-forward of main refuses" "$(rc)" 1 "$O"
+[ "$(remote_main)" = "$BEFORE" ] && pass "LD10 main did not move" || fail "LD10 main moved to a diverged commit"
+assert_rc    "LD10 and no land branch was pushed" "$(git -C "$LGH/remote.git" for-each-ref refs/heads/land | wc -l)" 0 "$O"
+
+# --- LD11-LD12: --rules applies the ruleset file: create once, then update in place
+mk_land
+mkdir -p "$LGH/clone/.github/rulesets"
+printf '{"name": "main", "target": "branch", "rules": []}\n' > "$LGH/clone/.github/rulesets/main.json"
+printf '[]\n' > "$LGH/rulesets"
+O=$(run_land --rules)
+assert_rc    "LD11 --rules with no ruleset on the remote creates it" "$(rc)" 0 "$O"
+assert_has   "LD11 by POST" "$LGH/log" "api repos/acme/widget/rulesets -X POST --input"
+printf '[{"id": 41, "name": "other", "source_type": "Repository"}, {"id": 42, "name": "main", "source_type": "Repository"}]\n' > "$LGH/rulesets"
+: > "$LGH/log"
+O=$(run_land --rules)
+assert_rc    "LD12 --rules with one already there updates it" "$(rc)" 0 "$O"
+assert_has   "LD12 by PUT to that ruleset's id" "$LGH/log" "api repos/acme/widget/rulesets/42 -X PUT --input"
+assert_lacks "LD12 and creates no second one" "$LGH/log" "-X POST"
+O=$(STUB_RULES_RC=1 run_land --rules)
+assert_rc    "LD12 an API refusal is a refusal" "$(rc)" 1 "$O"
+
 head2 "cc-publish.sh"
 
 # The public template edition (docs/PUBLISHING.md). Every case runs against a
@@ -4784,16 +4943,30 @@ O=$(run_pub "$S" --out "$OUT" --map "$MAP" --author "$AUTH")
 assert_rc    "PB14c a missing verifier refuses - an unverified tree is not published" "$(rc)" 1 "$O"
 mv "$WORK/pub.suite" "$S/tests/test-cc-scripts.sh"; pub_commit "$S" suiteback
 
-# --- PB15: --push, and only --push, moves the remote
-BARE="$WORK/pub.git"; git init -q --bare "$BARE"
+# --- PB15: --push, and only --push, moves the remote - and only through
+# cc-land.sh, so main moves once its required checks pass. The remote is the
+# cc-land.sh cases' stand-in GitHub: their stub gh and a bare repository with
+# one commit on main, reached through a HOME whose git config rewrites the URL.
+mk_land; BARE="$LGH/remote.git"; SEED=$(git -C "$BARE" rev-parse main)
+mkdir -p "$WORK/pubhome"; git config -f "$WORK/pubhome/.gitconfig" url."$BARE".insteadOf "$GHURL"
+printf '%s\n' "$GREEN" > "$LGH/checks.1"
+pub_land() { HOME="$WORK/pubhome" LGH="$LGH" PATH="$LGH/bin:$PATH" run_pub "$@"; }
 OUT2="$WORK/pubout2"
-O=$(run_pub "$S" --out "$OUT2" --remote "$BARE" --map "$MAP" --author "$AUTH")
+O=$(pub_land "$S" --out "$OUT2" --remote "$GHURL" --map "$MAP" --author "$AUTH")
 assert_rc    "PB15 a publish without --push exits 0" "$(rc)" 0 "$O"
-assert_rc    "PB15 and the remote is untouched" "$(git -C "$BARE" rev-list --all | wc -l)" 0
-O=$(run_pub "$S" --out "$OUT2" --remote "$BARE" --map "$MAP" --author "$AUTH" --push)
+[ "$(git -C "$BARE" rev-parse main)" = "$SEED" ] && pass "PB15 and the remote is untouched" || fail "PB15 a publish without --push moved the remote"
+assert_rc    "PB15 and gh was never asked anything" "$(wc -l < "$LGH/log")" 0 "$LGH/log"
+O=$(pub_land "$S" --out "$OUT2" --remote "$GHURL" --map "$MAP" --author "$AUTH" --push)
 assert_rc    "PB15 the --push run exits 0" "$(rc)" 0 "$O"
 [ "$(git -C "$BARE" rev-parse main 2>/dev/null)" = "$(git -C "$OUT2" rev-parse HEAD)" ] \
-  && pass "PB15 --push puts the reviewed commit on the remote's main" || fail "PB15 the remote's main is not the output's HEAD"
+  && pass "PB15 --push lands the reviewed commit on the remote's main" || fail "PB15 the remote's main is not the output's HEAD"
+assert_rc    "PB15 through a pull request, as cc-land.sh lands" "$(grep -c '^pr create' "$LGH/log")" 1 "$LGH/log"
+printf 'more\n' >> "$S/README.md"; pub_commit "$S" more; LANDED=$(git -C "$BARE" rev-parse main)
+rm -f "$LGH/polls"; printf '[{"name": "checks", "bucket": "pass"}, {"name": "test-suite", "bucket": "fail"}]\n' > "$LGH/checks.1"
+O=$(pub_land "$S" --out "$OUT2" --remote "$GHURL" --map "$MAP" --author "$AUTH" --push)
+assert_rc    "PB15 a --push whose required check fails is refused" "$(rc)" 1 "$O"
+assert_has   "PB15 refused for that check, not for anything earlier" "$O" "the required check test-suite"
+[ "$(git -C "$BARE" rev-parse main)" = "$LANDED" ] && pass "PB15 and the remote's main stays where it was" || fail "PB15 main moved past a failed check"
 
 # --- PB16: --scan, the mode the public repository's CI runs
 O=$(run_pub "$OUT" --scan)

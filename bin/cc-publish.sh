@@ -29,11 +29,15 @@
 #      (--scan) no denied term was found
 #   1  refused: a denied term, a secret, a document naming a record that is
 #      not published, a failed verification, or nothing to publish - nothing
-#      was committed; or --push failed, and the commit stays in DIR unpushed
+#      was committed; or --push did not land the commit (bin/cc-land.sh said
+#      why), and it stays in DIR unpushed
 #   2  could not run: wrong arguments, not inside a git clone, or a site map
 #      that is missing, readable by others, not JSON, or has no deny terms
 
 set -uo pipefail
+
+# --push lands through the sibling cc-land.sh; resolved before any cd.
+BIN_DIR=$(cd "$(dirname "$0")" && pwd) || { echo "cc-publish: cannot resolve this script's own directory" >&2; exit 2; }
 
 # The directory that holds a site's own records. It is never exported; the
 # overlay supplies blank registers in its place. A product convention, not a
@@ -299,10 +303,11 @@ else
   printf 'cc-publish: committed %s in %s\n' "$(git -C "$OUT" rev-parse --short HEAD)" "$OUT"
 fi
 
-# 7. push, only when asked
+# 7. land, only when asked: the remote's main moves to this commit by
+# fast-forward once the checks it requires have passed on it (cc-land.sh)
 if [ "$PUSH" -eq 1 ]; then
   git -C "$OUT" remote get-url origin >/dev/null 2>&1 || die "--push: $OUT has no origin remote (give --remote when creating it)"
-  git -C "$OUT" push -q origin HEAD:refs/heads/main || refuse "the push to origin failed"
-  printf 'cc-publish: pushed to origin main\n'
+  bash "$BIN_DIR/cc-land.sh" --repo "$OUT" || refuse "the commit did not land on origin main - it stays in $OUT, and the same command tries again"
+  printf 'cc-publish: landed on origin main\n'
 fi
 exit 0
